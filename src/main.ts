@@ -1,13 +1,14 @@
 /**
  * obsidian-nostr-sync — encrypted vault sync via Nostr relays.
  */
-import { Plugin } from "obsidian";
+import { Plugin, Notice } from "obsidian";
 import { nip19, getPublicKey } from "nostr-tools";
 import { DEFAULT_RELAYS } from "./constants";
 import type { NostrSyncSettings } from "./types";
 import { wrapNsec, unwrapNsec } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
 import { VaultWatcher } from "./sync/watcher";
+import type { FileChangeEvent } from "./sync/watcher";
 import { SettingsTab } from "./settings";
 import { PassphraseModal } from "./modals";
 
@@ -19,6 +20,8 @@ const DEFAULTS: NostrSyncSettings = {
   syncEnabled: false,
   syncStatus: "locked",
 };
+
+const MIN_PASSPHRASE_LENGTH = 8;
 
 export default class NostrSyncPlugin extends Plugin {
   declare settings: NostrSyncSettings;
@@ -45,8 +48,8 @@ export default class NostrSyncPlugin extends Plugin {
       id: "sync-now",
       name: "Sync Now",
       callback: () => {
-        /* Manual trigger — engine handles live events */
-        console.log("nostr-sync: manual sync triggered");
+        new Notice("Nostr Sync: checking for remote changes...");
+        void this.engine?.rebuildIndex();
       },
     });
   }
@@ -73,6 +76,7 @@ export default class NostrSyncPlugin extends Plugin {
     this.settings.syncEnabled   = false;
     this.engine?.stop();
     void this.saveSettings();
+    new Notice("Nostr Sync: key cleared.");
   }
 
   // ── Unlock ────────────────────────────────────────
@@ -93,7 +97,10 @@ export default class NostrSyncPlugin extends Plugin {
         pw,
       );
     } catch {
-      alert("Wrong passphrase. Try again or clear your key in settings.");
+      new Notice(
+        "Nostr Sync: wrong passphrase. Try again or clear your key in settings.",
+        8000,
+      );
       this.settings.syncStatus = "locked";
       await this.saveSettings();
       return;
@@ -102,6 +109,7 @@ export default class NostrSyncPlugin extends Plugin {
     await this.startSync(nsecBytes);
     this.settings.syncStatus = "idle";
     await this.saveSettings();
+    new Notice("Nostr Sync: unlocked and syncing");
   }
 
   // ── Sync ──────────────────────────────────────────
@@ -110,50 +118,68 @@ export default class NostrSyncPlugin extends Plugin {
     this.engine = new SyncEngine(
       this.app.vault,
       nsecBytes,
-      this.settings.relays,
+      this.settings.relays.filter((r) => r.startsWith("wss://") || r.startsWith("ws://")),
     );
 
-    this.watcher = new VaultWatcher(this.app.vault, (e) =>
-      this.handleFileChange(e.path, e.action),
+    this.watcher = new VaultWatcher(this.app.vault, (e: FileChangeEvent) =>
+      this.handleFileChange(e),
     );
 
-    void this.queueFileOp(async () => {
-      this.watcher.start();
-      await this.engine.start();
-    });
+    this.watcher.start();
+    await this.engine.start();
   }
 
-  // Drop-in method — bridges watcher events to engine
-  private async handleFileChange(
-    path: string,
-    action: string,
-  ): Promise<void> {
-    if (action === "delete") {
-      await this.engine.handleDelete(path);
-    } else {
-      await this.engine.pushFile(path);
+  /** Bridges VaultWatcher events to SyncEngine */
+  private async handleFileChange(e: FileChangeEvent): Promise<void> {
+    try {
+      switch (e.action) {
+        case "modify":
+        case "create":
+          await this.engine.pushFile(e.path);
+          break;
+        case "delete":
+          await this.engine.handleDelete(e.path);
+          break;
+        case "rename":
+          if (e.oldPath) {
+            await this.engine.handleRename(e.oldPath, e.path);
+          } else {
+            await this.engine.pushFile(e.path);
+          }
+          break;
+      }
+    } catch (err) {
+      // Don't crash on file-sync errors — log and continue
+      console.debug("nostr-sync: error handling file change:", e.path, err);
     }
-  }
-
-  // Stub to avoid race conditions (can be expanded for queue)
-  private async queueFileOp(fn: () => Promise<void>): Promise<void> {
-    await fn();
   }
 
   // ── Registration ──────────────────────────────────
 
+  /**
+   * Store a new nsec and start syncing. Called from settings UI or onboarding.
+   * Validates minimum passphrase length before encrypting.
+   */
   async storeNsec(nsec: string, passphrase: string): Promise<void> {
+    if (passphrase.length < MIN_PASSPHRASE_LENGTH) {
+      throw new Error(
+        `Passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters`,
+      );
+    }
+
     let nsecBytes: Uint8Array;
     if (nsec.startsWith("nsec")) {
       const decoded = nip19.decode(nsec);
-      if (decoded.type !== "nsec") throw new Error("Invalid nsec");
+      if (decoded.type !== "nsec") throw new Error("Invalid nsec key");
       nsecBytes = decoded.data;
     } else if (/^[0-9a-fA-F]{64}$/.test(nsec)) {
       nsecBytes = new Uint8Array(
         nsec.match(/.{1,2}/g)!.map((b) => parseInt(b, 16)),
       );
     } else {
-      throw new Error("Invalid nsec — must be nsec1... or 64 hex chars");
+      throw new Error(
+        "Invalid nsec — must be an nsec1... bech32 key or 64 hex characters",
+      );
     }
 
     const { salt, encrypted } = await wrapNsec(nsecBytes, passphrase);
@@ -166,5 +192,6 @@ export default class NostrSyncPlugin extends Plugin {
     await this.saveSettings();
 
     await this.startSync(nsecBytes);
+    new Notice(`Nostr Sync: registered with pubkey ${pubkey.slice(0, 12)}...`);
   }
 }

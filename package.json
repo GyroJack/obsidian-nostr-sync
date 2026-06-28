@@ -6,9 +6,17 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "tsc -noEmit -skipLibCheck"
   },
-  "keywords": ["obsidian", "nostr", "sync", "encrypted", "nip-44"],
+  "keywords": [
+    "obsidian",
+    "nostr",
+    "sync",
+    "encrypted",
+    "nip-44"
+  ],
   "license": "MIT",
   "dependencies": {
     "nostr-tools": "^2.19.4"
@@ -17,6 +25,8 @@
     "@types/node": "^20.14.0",
     "esbuild": "^0.25.0",
     "obsidian": "^1.7.0",
-    "typescript": "^5.9.3"
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.9"
   }
 }

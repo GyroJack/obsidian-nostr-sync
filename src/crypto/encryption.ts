@@ -17,7 +17,7 @@ function hexToBytes(hex: string): Uint8Array {
   const len = hex.length / 2;
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++)
-    bytes[i] = parseInt(hex.substring(i * 2, 2), 16);
+    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
   return bytes;
 }
 
@@ -133,7 +133,8 @@ export function encryptPayload(
   conversationKey: Uint8Array,
   plaintext: string,
 ): string {
-  // nip44.encrypt(plaintext, conversationKey)
+  // NIP-44 requires at least 1 byte — guard empty strings
+  if (!plaintext) return nip44.encrypt(" ", conversationKey) as string;
   return nip44.encrypt(plaintext, conversationKey) as string;
 }
 
