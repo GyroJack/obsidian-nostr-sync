@@ -76,6 +76,9 @@ export class SyncEngine {
   /** Strictly monotonic timestamp for event created_at (Fix 2). */
   private _lastEventTime = 0;
 
+  /** Set to true when a remote index event arrives (cold-start sync). */
+  private _receivedIndex = false;
+
   // -----------------------------------------------------------------------
   // Callbacks for the main plugin
   // -----------------------------------------------------------------------
@@ -160,7 +163,15 @@ export class SyncEngine {
       if (this.onHealthChange) {
         this.onHealthChange(this.relay.getHealth());
       }
+      this._receivedIndex = false;
       await this.subscribeAll();
+
+      // Wait up to 10 seconds for the remote index to arrive
+      for (let i = 0; i < 20 && !this._receivedIndex; i++) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+      // Push any local files the remote doesn't have
+      await this.syncAllLocalFiles();
     } catch (e) {
       if (!this.started) return;
       console.debug("nostr-sync: relay connect failed, retrying in", this.retryBackoff, "ms");
@@ -394,6 +405,32 @@ export class SyncEngine {
   // Pull: remote → local
   // -----------------------------------------------------------------------
 
+  /**
+   * Push all local syncable files that are missing from or newer than
+   * the remote state. Called once after initial connect to catch up.
+   */
+  private async syncAllLocalFiles(): Promise<void> {
+    const allFiles = this.vault.getMarkdownFiles();
+
+    for (const file of allFiles) {
+      const path = file.path;
+      if (!this.isSyncablePath(path)) continue;
+
+      const known = this.files.get(path);
+      if (!known) {
+        // File not on remote at all — push it
+        await this._pushFile(path);
+      } else {
+        // File known on remote, but check if local is newer
+        const content = await this.vault.adapter.read(path);
+        const checksum = await sha256(content);
+        if (checksum !== known.checksum) {
+          await this._pushFile(path);
+        }
+      }
+    }
+  }
+
   private async subscribeAll(): Promise<void> {
     for (const id of this.subIds) this.relay.unsubscribe(id);
     this.subIds = [];
@@ -412,7 +449,6 @@ export class SyncEngine {
     const fileFilter: Filter = {
       kinds: [FILE_KIND],
       authors: [this.pubkey],
-      since: Math.floor(Date.now() / 1000) - 60,
       limit: MAX_FETCH_LIMIT,
     };
     const sid2 = this.relay.subscribe(
@@ -448,6 +484,7 @@ export class SyncEngine {
     } catch (e) {
       console.debug("nostr-sync: unparseable vault index, skipping", e);
     }
+    this._receivedIndex = true;
   }
 
   private async onRemoteFile(event: Event): Promise<void> {
