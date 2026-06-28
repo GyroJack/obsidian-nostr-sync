@@ -42,7 +42,11 @@ export default class NostrSyncPlugin extends Plugin {
       );
 
       if (this.settings.syncEnabled && this.settings.encryptedNsec) {
-        await this.unlockAndStart();
+        // Defer modal to after layout ready — otherwise onload() hangs
+        // and Obsidian kills the plugin for taking too long.
+        this.app.workspace.onLayoutReady(() => {
+          void this.unlockAndStart();
+        });
       }
 
       this.addCommand({
