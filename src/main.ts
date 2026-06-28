@@ -25,7 +25,6 @@ const DEFAULTS: NostrSyncSettings = {
 export default class NostrSyncPlugin extends Plugin {
   declare settings: NostrSyncSettings;
   private engine!: SyncEngine;
-  private _syncTimer: ReturnType<typeof setInterval> | null = null;
   private statusBarItem: HTMLElement | null = null;
   private statusDebounce: ReturnType<typeof setTimeout> | null = null;
 
@@ -47,14 +46,19 @@ export default class NostrSyncPlugin extends Plugin {
         ),
       );
 
-      // Status bar
+      // Status bar — click triggers manual sync
       this.app.workspace.onLayoutReady(() => {
         this.statusBarItem = this.addStatusBarItem();
         this.setSyncStatus(this.settings.syncStatus || "locked");
         this.statusBarItem.addClass("nostr-sync-status-bar");
         this.statusBarItem.addEventListener("click", () => {
-          void this.showRelayHealthPopup();
+          void this.syncNow();
         });
+      });
+
+      // Ribbon icon for manual sync
+      this.addRibbonIcon("refresh-ccw", "Nostr Sync", () => {
+        void this.syncNow();
       });
 
       if (this.settings.syncEnabled && this.settings.encryptedNsec) {
@@ -86,11 +90,6 @@ export default class NostrSyncPlugin extends Plugin {
   }
 
   override async onunload(): Promise<void> {
-    // Stop interval timer
-    if (this._syncTimer) {
-      clearInterval(this._syncTimer);
-      this._syncTimer = null;
-    }
     // Push final state before disconnecting
     if (this.engine) {
       try {
@@ -231,11 +230,6 @@ export default class NostrSyncPlugin extends Plugin {
 
     // Do an initial sync on startup
     await this.syncNow();
-
-    // Set up 5-minute auto-sync interval
-    this._syncTimer = setInterval(() => {
-      void this.syncNow();
-    }, 5 * 60 * 1000);
   }
 
   /**
@@ -289,66 +283,6 @@ export default class NostrSyncPlugin extends Plugin {
         this.statusBarItem.setText("🔒 Nostr Sync: locked");
       }
     }, 150);
-  }
-
-  /** Show a notice with live relay pings and recent sync activity. */
-  private async showRelayHealthPopup(): Promise<void> {
-    const relays = this.settings.relays.filter(isValidRelayUrl);
-
-    // Show "measuring" notice while testing
-    const measuringNotice = new Notice("Measuring relay latency...", 0);
-
-    try {
-      // Test all relays in parallel
-      const results = await Promise.all(
-        relays.map(async (url) => {
-          const result = await this.testRelay(url);
-          return { url, ...result };
-        }),
-      );
-
-      // Format relay results
-      const relayLines: string[] = [];
-      for (const r of results) {
-        if (r.ok) {
-          const icon = r.latency < 200 ? "✅" : "🟡";
-          relayLines.push(`${icon} ${r.url} — ${r.latency}ms`);
-        } else {
-          relayLines.push(`❌ ${r.url} — failed`);
-        }
-      }
-
-      // Get recent activity
-      const activity = this.getRecentActivity();
-      const activityLines: string[] = [];
-      if (activity.length === 0) {
-        activityLines.push("No recent sync activity");
-      } else {
-        activityLines.push("Recent Activity (last 20):");
-        const recent = activity.slice(0, 20);
-        for (const entry of recent) {
-          const arrow = entry.action === "pulled" ? "↓" : entry.action === "pushed" ? "↑" : "✕";
-          activityLines.push(`${arrow} ${entry.action} ${entry.path}`);
-        }
-      }
-
-      // Build full message
-      const lines = [
-        "Nostr Sync",
-        "",
-        "Relays:",
-        ...relayLines,
-        "",
-        ...activityLines,
-      ];
-
-      // Dismiss measuring notice and show results
-      measuringNotice.hide();
-      new Notice(lines.join("\n"), 10000);
-    } catch (err) {
-      measuringNotice.hide();
-      new Notice("❌ Failed to test relays", 5000);
-    }
   }
 
   // ── Conflict Modal ────────────────────────────────

@@ -496,6 +496,18 @@ export class SyncEngine {
 
         // Real conflict: both local and remote changed relative to known state
         if (localChecksum !== known.checksum && payload.checksum !== known.checksum) {
+          // If both sides changed to the SAME content, it's not a real conflict —
+          // just a timing artifact. Update our known state and move on.
+          if (localChecksum === payload.checksum) {
+            this.files.set(payload.path, {
+              eventId: event.id!,
+              checksum: payload.checksum,
+              version: payload.version,
+            });
+            this.logActivity(payload.path, "pulled");
+            return;
+          }
+
           // CONFLICT DETECTED
           const conflictInfo: ConflictInfo = {
             path: payload.path,
