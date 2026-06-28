@@ -1,6 +1,6 @@
 {
   "name": "obsidian-nostr-sync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Encrypted Obsidian vault sync via Nostr relays (NIP-44)",
   "main": "main.js",
   "scripts": {
