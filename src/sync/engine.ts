@@ -208,6 +208,7 @@ export class SyncEngine {
       content: encrypted,
     };
     const signed = finalizeEvent(unsigned, this.privkey);
+    console.debug('nostr-sync encrypted publish | path:', path ?? 'index', '| content chars:', encrypted.length, '| first 30:', encrypted.slice(0, 30));
     await this.publishWithRetry(signed);
 
     this.files.set(path, {
@@ -252,6 +253,7 @@ export class SyncEngine {
       content: encrypted,
     };
     const signed = finalizeEvent(unsigned, this.privkey);
+    console.debug('nostr-sync encrypted publish | path: [vault index] | content chars:', encrypted.length, '| first 30:', encrypted.slice(0, 30));
     await this.publishWithRetry(signed);
   }
 
