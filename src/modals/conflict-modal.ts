@@ -34,7 +34,7 @@ export class ConflictModal extends Modal {
       text: `"${this.info.path}" was modified on both devices. Choose which version to keep.`,
     });
 
-    // Side-by-side diff
+    // Side-by-side diff with Obsidian CSS variables
     const container = contentEl.createDiv({ cls: "nostr-sync-conflict-container" });
     container.style.display = "flex";
     container.style.gap = "16px";
@@ -49,8 +49,11 @@ export class ConflictModal extends Modal {
     });
     localText.style.width = "100%";
     localText.style.height = "300px";
-    localText.style.fontFamily = "monospace";
     localText.style.fontSize = "12px";
+    localText.style.fontFamily = "var(--font-monospace)";
+    localText.style.background = "var(--background-primary)";
+    localText.style.color = "var(--text-normal)";
+    localText.style.border = "1px solid var(--background-modifier-border)";
 
     // Remote (right)
     const remoteCol = container.createDiv({ cls: "nostr-sync-conflict-col" });
@@ -62,8 +65,11 @@ export class ConflictModal extends Modal {
     });
     remoteText.style.width = "100%";
     remoteText.style.height = "300px";
-    remoteText.style.fontFamily = "monospace";
     remoteText.style.fontSize = "12px";
+    remoteText.style.fontFamily = "var(--font-monospace)";
+    remoteText.style.background = "var(--background-primary)";
+    remoteText.style.color = "var(--text-normal)";
+    remoteText.style.border = "1px solid var(--background-modifier-border)";
 
     // Buttons
     const btnRow = contentEl.createDiv({ cls: "nostr-sync-conflict-buttons" });
@@ -72,7 +78,7 @@ export class ConflictModal extends Modal {
     btnRow.style.marginTop = "16px";
     btnRow.style.justifyContent = "flex-end";
 
-    const keepLocalBtn = btnRow.createEl("button", { text: "Keep Local" });
+    const keepLocalBtn = btnRow.createEl("button", { text: "Keep Local", cls: "mod-cta" });
     keepLocalBtn.addEventListener("click", () => { this.resolve("keep-local"); this.close(); });
 
     const keepRemoteBtn = btnRow.createEl("button", { text: "Keep Remote" });

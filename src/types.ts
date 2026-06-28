@@ -41,6 +41,8 @@ export interface NostrSyncSettings {
   relays: string[];
   syncEnabled: boolean;
   syncStatus: SyncStatus;
+  lastSyncTime: number;    // Unix timestamp ms, 0 if never
+  syncedFileCount: number;
 }
 
 export type SyncStatus = "locked" | "unlocked" | "idle" | "syncing" | "error" | "offline" | "conflict";

@@ -1,11 +1,12 @@
 /**
  * SettingsTab — plugin configuration UI in Obsidian's Settings panel.
  */
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
 import type { NostrSyncSettings, RelayHealth } from "./types";
 import { formatRelayHealth } from "./types";
 import type NostrSyncPlugin from "./main";
+import { nip19 } from "nostr-tools";
 
 export class SettingsTab extends PluginSettingTab {
   private settings: NostrSyncSettings;
@@ -13,6 +14,8 @@ export class SettingsTab extends PluginSettingTab {
   private clearNsecFn: () => void;
   private storeNsecFn: (nsec: string, passphrase: string) => Promise<void>;
   private getRelayHealth: () => RelayHealth[];
+  private relayTestFn: (url: string) => Promise<{ ok: boolean; latency: number }>;
+  private getSyncStats: () => { fileCount: number; lastSync: number };
 
   constructor(
     app: App,
@@ -22,6 +25,8 @@ export class SettingsTab extends PluginSettingTab {
     clearNsecFn: () => void,
     storeNsecFn: (nsec: string, passphrase: string) => Promise<void>,
     getRelayHealth: () => RelayHealth[],
+    relayTestFn?: (url: string) => Promise<{ ok: boolean; latency: number }>,
+    getSyncStats?: () => { fileCount: number; lastSync: number },
   ) {
     super(app, plugin);
     this.settings       = settings;
@@ -29,6 +34,18 @@ export class SettingsTab extends PluginSettingTab {
     this.clearNsecFn    = clearNsecFn;
     this.storeNsecFn    = storeNsecFn;
     this.getRelayHealth = getRelayHealth;
+    this.relayTestFn    = relayTestFn ?? (async () => ({ ok: false, latency: -1 }));
+    this.getSyncStats   = getSyncStats ?? (() => ({ fileCount: 0, lastSync: 0 }));
+  }
+
+  /** Format a timestamp for display as a relative time string. */
+  private formatTimeAgo(ts: number): string {
+    if (ts === 0) return "Never synced";
+    const diff = Date.now() - ts;
+    if (diff < 60_000) return "just now";
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+    return new Date(ts).toLocaleDateString();
   }
 
   override display(): void {
@@ -46,6 +63,17 @@ export class SettingsTab extends PluginSettingTab {
       cls: "nostr-sync-status",
     });
 
+    // ── Sync Stats ──────────────────────────────────
+    const stats = this.getSyncStats();
+    const timeStr = this.formatTimeAgo(stats.lastSync);
+    const statsLine = stats.lastSync === 0
+      ? "Never synced"
+      : `Last sync: ${timeStr} • ${stats.fileCount} files synced`;
+    containerEl.createEl("p", {
+      text: statsLine,
+      cls: "setting-item-description",
+    });
+
     // ── Toggle ──────────────────────────────────────
     new Setting(containerEl)
       .setName("Enable sync")
@@ -61,12 +89,15 @@ export class SettingsTab extends PluginSettingTab {
 
     if (this.settings.encryptedNsec) {
       // ── Public key ──────────────────────────────────
+      const npub = this.settings.pubkey
+        ? (() => { try { return nip19.npubEncode(this.settings.pubkey); } catch { return this.settings.pubkey; } })()
+        : "";
       new Setting(containerEl)
         .setName("Public key")
-        .setDesc("Your Nostr public key (npub)")
+        .setDesc("Your Nostr public key")
         .addText((t) =>
           t
-            .setValue(this.settings.pubkey || "")
+            .setValue(npub || "Not available")
             .setDisabled(true),
         );
 
@@ -176,6 +207,7 @@ export class SettingsTab extends PluginSettingTab {
       header.createEl("th", { text: "Relay" });
       header.createEl("th", { text: "Latency" });
       header.createEl("th", { text: "Errors" });
+      header.createEl("th", { text: "Test" });
 
       for (const h of health) {
         const f = formatRelayHealth(h);
@@ -184,6 +216,21 @@ export class SettingsTab extends PluginSettingTab {
         row.createEl("td", { text: h.url });
         row.createEl("td", { text: f.latencyStr });
         row.createEl("td", { text: h.consecutiveErrors > 0 ? `${h.consecutiveErrors}` : "0" });
+        // Test button
+        const testTd = row.createEl("td");
+        const testBtn = testTd.createEl("button", { text: "Test" });
+        testBtn.addEventListener("click", async () => {
+          testBtn.setText("Testing...");
+          testBtn.setAttr("disabled", "true");
+          const result = await this.relayTestFn(h.url);
+          if (result.ok) {
+            new Notice(`✅ Connected to ${h.url} (${result.latency}ms)`);
+          } else {
+            new Notice(`❌ Failed to connect to ${h.url}`);
+          }
+          testBtn.setText("Test");
+          testBtn.removeAttribute("disabled");
+        });
       }
     }
   }

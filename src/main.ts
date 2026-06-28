@@ -2,7 +2,7 @@
  * obsidian-nostr-sync — encrypted vault sync via Nostr relays.
  */
 import { Plugin, Notice } from "obsidian";
-import { nip19, getPublicKey } from "nostr-tools";
+import { nip19, getPublicKey, SimplePool } from "nostr-tools";
 import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS } from "./constants";
 import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo } from "./types";
 import { formatRelayHealth } from "./types";
@@ -21,6 +21,8 @@ const DEFAULTS: NostrSyncSettings = {
   relays: [...DEFAULT_RELAYS],
   syncEnabled: false,
   syncStatus: "locked",
+  lastSyncTime: 0,
+  syncedFileCount: 0,
 };
 
 export default class NostrSyncPlugin extends Plugin {
@@ -43,6 +45,8 @@ export default class NostrSyncPlugin extends Plugin {
           () => this.clearStoredKey(),
           (nsec, passphrase) => this.storeNsec(nsec, passphrase),
           () => this.getRelayHealth(),
+          (url) => this.testRelay(url),
+          () => this.getSyncStats(),
         ),
       );
 
@@ -68,8 +72,19 @@ export default class NostrSyncPlugin extends Plugin {
         id: "sync-now",
         name: "Sync Now",
         callback: () => {
-          new Notice("Nostr Sync: checking for remote changes...");
-          void this.engine?.rebuildIndex();
+          if (!this.engine) {
+            new Notice("❌ Nostr Sync: engine not started. Register a key first.");
+            return;
+          }
+          new Notice("🔄 Syncing...");
+          this.setSyncStatus("syncing");
+          void this.engine.rebuildIndex().then(() => {
+            this.setSyncStatus("idle");
+            new Notice("✅ Sync complete");
+          }).catch(() => {
+            this.setSyncStatus("idle");
+            new Notice("❌ Sync failed");
+          });
         },
       });
     } catch (err) {
@@ -300,6 +315,7 @@ export default class NostrSyncPlugin extends Plugin {
 
   private async showConflictModal(info: ConflictInfo): Promise<void> {
     this.setSyncStatus("conflict");
+    new Notice(`⚠️ Sync conflict: "${info.path}" was modified on both devices.`, 8000);
     const choice = await ConflictModal.show(this.app, info);
     await this.engine?.resolveConflict(info.path, choice);
     this.setSyncStatus("idle");
@@ -309,5 +325,28 @@ export default class NostrSyncPlugin extends Plugin {
 
   getRelayHealth(): RelayHealth[] {
     return this.engine?.getRelayHealth() ?? [];
+  }
+
+  /** Test a single relay connection and measure latency. */
+  async testRelay(url: string): Promise<{ ok: boolean; latency: number }> {
+    const pool = new SimplePool();
+    const start = Date.now();
+    try {
+      await pool.ensureRelay(url);
+      const latency = Date.now() - start;
+      pool.close([url]);
+      return { ok: true, latency };
+    } catch {
+      pool.close([url]);
+      return { ok: false, latency: -1 };
+    }
+  }
+
+  /** Get sync stats from the engine. */
+  getSyncStats(): { fileCount: number; lastSync: number } {
+    if (this.engine) {
+      return this.engine.getSyncStats();
+    }
+    return { fileCount: 0, lastSync: 0 };
   }
 }

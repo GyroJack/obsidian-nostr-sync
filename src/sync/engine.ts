@@ -62,6 +62,9 @@ export class SyncEngine {
   /** Stored conflict info for resolution (supports multiple concurrent conflicts). */
   private _pendingConflicts = new Map<string, ConflictInfo>();
 
+  /** Track last sync time for stats display. */
+  private _lastSync = 0;
+
   // -----------------------------------------------------------------------
   // Callbacks for the main plugin
   // -----------------------------------------------------------------------
@@ -161,6 +164,11 @@ export class SyncEngine {
   /** Expose relay health for the settings tab and status bar. */
   getRelayHealth(): RelayHealth[] {
     return this.relay.getHealth();
+  }
+
+  /** Expose sync stats for the settings tab. */
+  getSyncStats(): { fileCount: number; lastSync: number } {
+    return { fileCount: this.files.size, lastSync: this._lastSync };
   }
 
   // -----------------------------------------------------------------------
@@ -304,6 +312,7 @@ export class SyncEngine {
     const signed = finalizeEvent(unsigned, this.privkey);
     console.debug('nostr-sync encrypted publish | path: [vault index] | content chars:', encrypted.length, '| first 30:', encrypted.slice(0, 30));
     await this.publishWithRetry(signed);
+    this._lastSync = Date.now();
   }
 
   // -----------------------------------------------------------------------
