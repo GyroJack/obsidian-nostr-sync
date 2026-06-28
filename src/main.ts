@@ -4,7 +4,9 @@
 import { Plugin, Notice } from "obsidian";
 import { nip19, getPublicKey } from "nostr-tools";
 import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
-import type { NostrSyncSettings } from "./types";
+import type { NostrSyncSettings, RelayHealth } from "./types";
+import type { ConflictInfo } from "./modals/conflict-modal";
+import { ConflictModal } from "./modals/conflict-modal";
 import { unwrapNsec, wrapNsec } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
 import { VaultWatcher } from "./sync/watcher";
@@ -25,6 +27,7 @@ export default class NostrSyncPlugin extends Plugin {
   declare settings: NostrSyncSettings;
   private engine!: SyncEngine;
   private watcher!: VaultWatcher;
+  private statusBarItem: HTMLElement | null = null;
 
   override async onload(): Promise<void> {
     try {
@@ -38,8 +41,19 @@ export default class NostrSyncPlugin extends Plugin {
           () => this.saveSettings(),
           () => this.clearStoredKey(),
           (nsec, passphrase) => this.storeNsec(nsec, passphrase),
+          () => this.getRelayHealth(),
         ),
       );
+
+      // Status bar
+      this.app.workspace.onLayoutReady(() => {
+        this.statusBarItem = this.addStatusBarItem();
+        this.setSyncStatus(this.settings.syncStatus || "locked");
+        this.statusBarItem.addClass("nostr-sync-status-bar");
+        this.statusBarItem.addEventListener("click", () => {
+          this.showRelayHealthPopup();
+        });
+      });
 
       if (this.settings.syncEnabled && this.settings.encryptedNsec) {
         // Defer modal to after layout ready — otherwise onload() hangs
@@ -147,6 +161,7 @@ export default class NostrSyncPlugin extends Plugin {
     if (!pw) {
       this.settings.syncStatus = "locked";
       await this.saveSettings();
+      this.setSyncStatus("locked");
       return;
     }
 
@@ -164,6 +179,7 @@ export default class NostrSyncPlugin extends Plugin {
       );
       this.settings.syncStatus = "locked";
       await this.saveSettings();
+      this.setSyncStatus("locked");
       return;
     }
 
@@ -181,6 +197,19 @@ export default class NostrSyncPlugin extends Plugin {
       nsecBytes,
       this.settings.relays.filter(isValidRelayUrl),
     );
+
+    // Wire relay health to status bar
+    this.engine.onHealthChange = (health) => {
+      const allDown = health.length > 0 && health.every((h) => h.consecutiveErrors >= 5);
+      this.setSyncStatus(allDown ? "offline" : "idle");
+    };
+
+    // Wire conflict detection
+    this.engine.onConflict = (info) => this.showConflictModal(info);
+
+    // Wire sync state
+    this.engine.onSyncStart = () => this.setSyncStatus("syncing");
+    this.engine.onSyncEnd = () => this.setSyncStatus("idle");
 
     this.watcher = new VaultWatcher(this.app.vault, (e: FileChangeEvent) =>
       this.handleFileChange(e),
@@ -215,4 +244,66 @@ export default class NostrSyncPlugin extends Plugin {
     }
   }
 
+  // ── Status Bar ────────────────────────────────────
+
+  private setSyncStatus(status: string): void {
+    if (!this.statusBarItem) return;
+    switch (status) {
+      case "locked":
+        this.statusBarItem.setText("🔒 Nostr Sync: locked");
+        break;
+      case "unlocked":
+        this.statusBarItem.setText("🔓 Nostr Sync: ready");
+        break;
+      case "idle":
+        this.statusBarItem.setText("✅ Nostr Sync");
+        break;
+      case "syncing":
+        this.statusBarItem.setText("🔄 Nostr Sync: syncing...");
+        break;
+      case "error":
+        this.statusBarItem.setText("❌ Nostr Sync: error");
+        break;
+      case "offline":
+        this.statusBarItem.setText("⬜ Nostr Sync: offline");
+        break;
+      case "conflict":
+        this.statusBarItem.setText("⚠️ Nostr Sync: conflict");
+        break;
+      default:
+        this.statusBarItem.setText("🔒 Nostr Sync: locked");
+    }
+  }
+
+  /** Show a notice with relay health info. */
+  private showRelayHealthPopup(): void {
+    const health = this.getRelayHealth();
+    if (health.length === 0) {
+      new Notice("No relay health data yet. Start sync to connect.");
+      return;
+    }
+    const lines = ["Relay Health:"];
+    for (const h of health) {
+      const statusIcon = h.connected ? "✅" : h.consecutiveErrors > 0 ? "🟡" : "❌";
+      const latencyStr = h.latency === -1 ? "—" : `${h.latency}ms`;
+      const errorStr = h.consecutiveErrors > 0 ? ` (${h.consecutiveErrors} errors)` : "";
+      lines.push(`${statusIcon} ${h.url} — ${latencyStr}${errorStr}`);
+    }
+    new Notice(lines.join("\n"), 8000);
+  }
+
+  // ── Conflict Modal ────────────────────────────────
+
+  private async showConflictModal(info: ConflictInfo): Promise<void> {
+    this.setSyncStatus("conflict");
+    const choice = await ConflictModal.show(this.app, info);
+    await this.engine?.resolveConflict(info.path, choice);
+    this.setSyncStatus("idle");
+  }
+
+  // ── Relay Health ──────────────────────────────────
+
+  getRelayHealth(): RelayHealth[] {
+    return this.engine?.getRelayHealth() ?? [];
+  }
 }

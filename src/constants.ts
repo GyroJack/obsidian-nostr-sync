@@ -19,6 +19,12 @@ export const SYNC_DEBOUNCE_MS = 3_000;
 /** Max events to fetch in a single relay query */
 export const MAX_FETCH_LIMIT = 500;
 
+/** Interval at which relay health is re-checked (ms) */
+export const HEALTH_CHECK_INTERVAL_MS = 30_000;
+
+/** Max consecutive errors before a relay is considered dead */
+export const MAX_CONSECUTIVE_ERRORS = 5;
+
 /** Validate a relay URL: must be a ws:// or wss:// WebSocket URL. */
 export function isValidRelayUrl(url: string): boolean {
   if (!url) return false;

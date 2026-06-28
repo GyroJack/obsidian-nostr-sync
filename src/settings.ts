@@ -3,7 +3,7 @@
  */
 import { App, PluginSettingTab, Setting } from "obsidian";
 import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
-import type { NostrSyncSettings } from "./types";
+import type { NostrSyncSettings, RelayHealth } from "./types";
 import type NostrSyncPlugin from "./main";
 
 export class SettingsTab extends PluginSettingTab {
@@ -11,6 +11,7 @@ export class SettingsTab extends PluginSettingTab {
   private saveFn: () => Promise<void>;
   private clearNsecFn: () => void;
   private storeNsecFn: (nsec: string, passphrase: string) => Promise<void>;
+  private getRelayHealth: () => RelayHealth[];
 
   constructor(
     app: App,
@@ -19,12 +20,14 @@ export class SettingsTab extends PluginSettingTab {
     saveFn: () => Promise<void>,
     clearNsecFn: () => void,
     storeNsecFn: (nsec: string, passphrase: string) => Promise<void>,
+    getRelayHealth: () => RelayHealth[],
   ) {
     super(app, plugin);
-    this.settings     = settings;
-    this.saveFn       = saveFn;
-    this.clearNsecFn  = clearNsecFn;
-    this.storeNsecFn  = storeNsecFn;
+    this.settings       = settings;
+    this.saveFn         = saveFn;
+    this.clearNsecFn    = clearNsecFn;
+    this.storeNsecFn    = storeNsecFn;
+    this.getRelayHealth = getRelayHealth;
   }
 
   override display(): void {
@@ -156,5 +159,31 @@ export class SettingsTab extends PluginSettingTab {
       text: "Default relays: damus.io, nos.lol, primal.net, ditto.pub",
       cls: "setting-item-description",
     });
+
+    // ── Relay Health ────────────────────────────────
+    containerEl.createEl("h3", { text: "Relay Health" });
+    const health = this.getRelayHealth();
+    if (health.length === 0) {
+      containerEl.createEl("p", {
+        text: "No relay health data yet. Start sync to connect.",
+        cls: "setting-item-description",
+      });
+    } else {
+      const table = containerEl.createEl("table", { cls: "nostr-sync-health-table" });
+      const header = table.createEl("tr");
+      header.createEl("th", { text: "Status" });
+      header.createEl("th", { text: "Relay" });
+      header.createEl("th", { text: "Latency" });
+      header.createEl("th", { text: "Errors" });
+
+      for (const h of health) {
+        const row = table.createEl("tr");
+        const statusIcon = h.connected ? "✅" : h.consecutiveErrors > 0 ? "🟡" : "❌";
+        row.createEl("td", { text: statusIcon });
+        row.createEl("td", { text: h.url });
+        row.createEl("td", { text: h.latency === -1 ? "—" : `${h.latency}ms` });
+        row.createEl("td", { text: h.consecutiveErrors > 0 ? `${h.consecutiveErrors}` : "0" });
+      }
+    }
   }
 }

@@ -14,7 +14,8 @@ import {
 } from "nostr-tools";
 import type { Vault } from "obsidian";
 import { FILE_KIND, INDEX_KIND, MAX_FETCH_LIMIT } from "../constants";
-import type { KnownFile, VaultIndexPayload, FilePayload } from "../types";
+import type { KnownFile, VaultIndexPayload, FilePayload, RelayHealth } from "../types";
+import type { ConflictInfo } from "../modals/conflict-modal";
 import {
   decryptPayload,
   encryptPayload,
@@ -45,7 +46,7 @@ export class SyncEngine {
   private convKey: Uint8Array;
 
   /** Relay transport */
-  private relay: RelayPool;
+  relay: RelayPool;
   private vaultId: string;
 
   /** Sub IDs */
@@ -58,6 +59,25 @@ export class SyncEngine {
   /** Retry state */
   private retryBackoff = 2_000; // starts at 2s, doubles each failure
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Stored conflict info for resolution */
+  private _lastConflict: ConflictInfo | null = null;
+
+  // -----------------------------------------------------------------------
+  // Callbacks for the main plugin
+  // -----------------------------------------------------------------------
+
+  /** Called when a sync conflict is detected. */
+  onConflict: ((info: ConflictInfo) => void) | null = null;
+
+  /** Called when relay health data changes. */
+  onHealthChange: ((health: RelayHealth[]) => void) | null = null;
+
+  /** Called when a sync operation starts. */
+  onSyncStart: (() => void) | null = null;
+
+  /** Called when a sync operation ends (success or failure). */
+  onSyncEnd: (() => void) | null = null;
 
   // -----------------------------------------------------------------------
   // Constructor
@@ -86,6 +106,11 @@ export class SyncEngine {
     this.relay = new RelayPool(
       relays ?? ["wss://relay.damus.io", "wss://nos.lol"],
     );
+
+    // Wire health callback
+    this.relay.onHealthChange = (health) => {
+      if (this.onHealthChange) this.onHealthChange(health);
+    };
   }
 
   // -----------------------------------------------------------------------
@@ -117,6 +142,10 @@ export class SyncEngine {
     try {
       await this.relay.connect();
       this.retryBackoff = 2_000; // reset on success
+      // Report initial health after connecting
+      if (this.onHealthChange) {
+        this.onHealthChange(this.relay.getHealth());
+      }
       await this.subscribeAll();
     } catch {
       if (!this.started) return;
@@ -129,6 +158,11 @@ export class SyncEngine {
     }
   }
 
+  /** Expose relay health for the settings tab and status bar. */
+  getRelayHealth(): RelayHealth[] {
+    return this.relay.getHealth();
+  }
+
   // -----------------------------------------------------------------------
   // Push: local → remote
   // -----------------------------------------------------------------------
@@ -138,32 +172,47 @@ export class SyncEngine {
    * The call is serialized via an internal operation queue.
    */
   async pushFile(path: string): Promise<void> {
-    await this.enqueue(async () => {
-      await this._pushFile(path);
-    });
+    this.onSyncStart?.();
+    try {
+      await this.enqueue(async () => {
+        await this._pushFile(path);
+      });
+    } finally {
+      this.onSyncEnd?.();
+    }
   }
 
   /** Mark a file as deleted and publish an updated vault index. */
   async handleDelete(path: string): Promise<void> {
-    await this.enqueue(async () => {
-      this.files.delete(path);
-      await this._pushIndex();
-    });
+    this.onSyncStart?.();
+    try {
+      await this.enqueue(async () => {
+        this.files.delete(path);
+        await this._pushIndex();
+      });
+    } finally {
+      this.onSyncEnd?.();
+    }
   }
 
   /** Handle a file rename (old path → new path), preserving history in the index. */
   async handleRename(oldPath: string, newPath: string): Promise<void> {
-    await this.enqueue(async () => {
-      // Remove old entry
-      this.files.delete(oldPath);
-      // Push new file (if exists)
-      const exists = await this.vault.adapter.exists(newPath);
-      if (exists) {
-        await this._pushFile(newPath);
-      }
-      // Publish index with tombstone for old
-      await this._pushIndex([oldPath]);
-    });
+    this.onSyncStart?.();
+    try {
+      await this.enqueue(async () => {
+        // Remove old entry
+        this.files.delete(oldPath);
+        // Push new file (if exists)
+        const exists = await this.vault.adapter.exists(newPath);
+        if (exists) {
+          await this._pushFile(newPath);
+        }
+        // Publish index with tombstone for old
+        await this._pushIndex([oldPath]);
+      });
+    } finally {
+      this.onSyncEnd?.();
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -364,14 +413,37 @@ export class SyncEngine {
         return;
       }
 
+      // ── Conflict detection ─────────────────────────────────────
+      const localExists = await this.vault.adapter.exists(payload.path);
+      if (localExists && known && payload.version > known.version) {
+        // Remote has a newer version, but we may have local changes too
+        const localContent = await this.vault.adapter.read(payload.path);
+        const localChecksum = await sha256(localContent);
+
+        // Real conflict: both local and remote changed relative to known state
+        if (localChecksum !== known.checksum && payload.checksum !== known.checksum) {
+          // CONFLICT DETECTED
+          this._lastConflict = {
+            path: payload.path,
+            localContent,
+            remoteContent: payload.content,
+            localVersion: known.version + 1, // approximate
+            remoteVersion: payload.version,
+          };
+          if (this.onConflict) {
+            this.onConflict(this._lastConflict);
+          }
+          return; // Don't auto-overwrite — wait for user resolution
+        }
+      }
+
       // Create parent directories if needed
       const dir = payload.path.substring(0, payload.path.lastIndexOf("/"));
       if (dir && !(await this.vault.adapter.exists(dir))) {
         await this.vault.createFolder(dir);
       }
 
-      const exists = await this.vault.adapter.exists(payload.path);
-      if (exists) {
+      if (localExists) {
         await this.vault.adapter.write(payload.path, payload.content);
       } else {
         await this.vault.create(payload.path, payload.content);
@@ -385,6 +457,55 @@ export class SyncEngine {
     } catch {
       // skip
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Conflict resolution
+  // -----------------------------------------------------------------------
+
+  /**
+   * Resolve a sync conflict by applying the user's chosen strategy.
+   */
+  async resolveConflict(path: string, choice: "keep-local" | "keep-remote" | "keep-both"): Promise<void> {
+    await this.enqueue(async () => {
+      if (choice === "keep-local") {
+        // Re-push local version to update remote
+        await this._pushFile(path);
+      } else if (choice === "keep-remote") {
+        // Write remote content to path, then push updated index
+        if (this._lastConflict && this._lastConflict.path === path) {
+          const exists = await this.vault.adapter.exists(path);
+          if (exists) {
+            await this.vault.adapter.write(path, this._lastConflict.remoteContent);
+          } else {
+            await this.vault.create(path, this._lastConflict.remoteContent);
+          }
+          // Update known state with remote version
+          const checksum = await sha256(this._lastConflict.remoteContent);
+          this.files.set(path, {
+            eventId: "", // will be set on next push
+            checksum,
+            version: this._lastConflict.remoteVersion,
+          });
+        }
+        await this._pushFile(path);
+      } else {
+        // keep-both: duplicate local file with conflict suffix
+        const ext = path.lastIndexOf(".");
+        const base = ext > 0 ? path.substring(0, ext) : path;
+        const suffix = ext > 0 ? path.substring(ext) : "";
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
+        const conflictPath = `${base}-conflict-${timestamp}${suffix}`;
+
+        // Write remote content to conflict file
+        if (this._lastConflict && this._lastConflict.path === path) {
+          await this.vault.create(conflictPath, this._lastConflict.remoteContent);
+          await this._pushFile(conflictPath);
+        }
+        // Keep local file as-is (already on disk)
+        await this._pushFile(path);
+      }
+    });
   }
 
   // -----------------------------------------------------------------------
@@ -412,5 +533,4 @@ export class SyncEngine {
       await this._pushIndex();
     });
   }
-
 }

@@ -43,11 +43,22 @@ export interface NostrSyncSettings {
   syncStatus: SyncStatus;
 }
 
-export type SyncStatus = "unlocked" | "locked" | "syncing" | "idle" | "error" | "offline";
+export type SyncStatus = "locked" | "unlocked" | "idle" | "syncing" | "error" | "offline" | "conflict";
 
 /** In-memory representation of a known synced file */
 export interface KnownFile {
   eventId: string;
   checksum: string;
   version: number;
+}
+
+/** Per-relay health tracking state */
+export interface RelayHealth {
+  url: string;
+  connected: boolean;
+  latency: number;           // last measured ms, -1 if unknown
+  consecutiveErrors: number;
+  lastError: string | null;
+  lastChecked: number;       // Unix timestamp ms
+  healthScore: number;       // lower = better, computed
 }
