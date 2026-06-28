@@ -6,13 +6,11 @@ export interface FilePayload {
   version: number;
   modified: number;     // Unix timestamp
   contentType: string;  // "text/markdown" by default
-  previousEventId?: string;
 }
 
 /** Entry in the vault index (kind 30801) */
 export interface VaultFileEntry {
   eventId: string;
-  d: string;            // d-tag = file path
   path: string;
   checksum: string;
   version: number;
@@ -52,19 +50,4 @@ export interface KnownFile {
   eventId: string;
   checksum: string;
   version: number;
-}
-
-/** Result of publishing a file to relays */
-export interface PublishResult {
-  eventId: string;
-  path: string;
-  checksum: string;
-}
-
-/** What the relay subscription passes to on-file handlers */
-export interface RemoteFileEvent {
-  eventId: string;
-  path: string;
-  encryptedContent: string;
-  checksum: string;
 }

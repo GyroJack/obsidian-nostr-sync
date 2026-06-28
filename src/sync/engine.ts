@@ -8,7 +8,6 @@
 
 import {
   finalizeEvent,
-  generateSecretKey,
   getPublicKey,
   type Event,
   type Filter,
@@ -24,11 +23,13 @@ import {
 } from "../crypto/encryption";
 import { RelayPool } from "./relays";
 
-// ---------------------------------------------------------------------------
-// Chunking constants (NIP-44 plaintext limit: 65,535 bytes, safe margin 60K)
-// ---------------------------------------------------------------------------
-const CHUNK_SIZE = 60_000;
-const CHUNK_HEADER_PREFIX = '{"_chunked":true,"total":';
+/** Non-text file extensions to skip during sync. */
+const SKIP_EXTS = new Set([
+  "png", "jpg", "jpeg", "gif", "webp", "svg", "ico",
+  "pdf", "mp4", "mp3", "ogg", "wav", "webm",
+  "zip", "gz", "tar", "7z",
+  "excalidraw", // Excalidraw JSON is syncable, but the lib file isn't
+]);
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -54,9 +55,6 @@ export class SyncEngine {
   /** Serialize writes to prevent race conditions */
   private opQueue: Promise<void> = Promise.resolve();
 
-  /** Debounce index pushes (batch multiple file changes) */
-  private indexPushTimer: ReturnType<typeof setTimeout> | null = null;
-
   /** Retry state */
   private retryBackoff = 2_000; // starts at 2s, doubles each failure
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -67,20 +65,18 @@ export class SyncEngine {
 
   /**
    * @param vault Obsidian vault instance.
-   * @param privkey Nostr secret key bytes or hex string. If omitted, a random key is generated.
+   * @param privkey Nostr secret key bytes or hex string.
    * @param relays WebSocket relay URLs.
    */
   constructor(
     private vault: Vault,
-    privkey?: Uint8Array | string,
+    privkey: Uint8Array | string,
     relays?: string[],
   ) {
     const sk: Uint8Array =
       privkey instanceof Uint8Array
         ? privkey
-        : typeof privkey === "string"
-          ? new Uint8Array(Buffer.from(privkey, "hex"))
-          : generateSecretKey();
+        : new Uint8Array(Buffer.from(privkey, "hex"));
 
     this.privkey = sk;
     this.pubkey  = getPublicKey(sk);
@@ -90,11 +86,6 @@ export class SyncEngine {
     this.relay = new RelayPool(
       relays ?? ["wss://relay.damus.io", "wss://nos.lol"],
     );
-  }
-
-  /** The public key (hex) derived from the configured private key. */
-  get publicKey(): string {
-    return this.pubkey;
   }
 
   // -----------------------------------------------------------------------
@@ -113,16 +104,9 @@ export class SyncEngine {
   stop(): void {
     this.started = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    if (this.indexPushTimer) clearTimeout(this.indexPushTimer);
     for (const id of this.subIds) this.relay.unsubscribe(id);
     this.subIds = [];
     this.relay.disconnect();
-  }
-
-  /** Replace the relay list at runtime and reconnect. */
-  updateRelays(relays: string[]): void {
-    this.relay.setUrls(relays);
-    void this.connectWithRetry();
   }
 
   // -----------------------------------------------------------------------
@@ -211,7 +195,7 @@ export class SyncEngine {
     };
 
     const plaintext = JSON.stringify(payload);
-    const encrypted = this.chunkEncrypt(plaintext);
+    const encrypted = encryptPayload(this.convKey, plaintext);
 
     // Use a hash of the path as the d-tag so relays cannot read file names.
     const pathHash = await sha256(path);
@@ -232,14 +216,12 @@ export class SyncEngine {
       version,
     });
 
-    // Debounce index push — batch multiple rapid file changes
-    this.scheduleIndexPush();
+    await this._pushIndex();
   }
 
   private async _pushIndex(deletedPaths: string[] = []): Promise<void> {
     const entries = Array.from(this.files.entries()).map(([path, f]) => ({
       eventId: f.eventId,
-      d: path,
       path,
       checksum: f.checksum,
       version: f.version,
@@ -271,86 +253,6 @@ export class SyncEngine {
     };
     const signed = finalizeEvent(unsigned, this.privkey);
     await this.publishWithRetry(signed);
-  }
-
-  // -----------------------------------------------------------------------
-  // Debounced index push
-  // -----------------------------------------------------------------------
-
-  private scheduleIndexPush(): void {
-    if (this.indexPushTimer) clearTimeout(this.indexPushTimer);
-    this.indexPushTimer = setTimeout(
-      () => void this.enqueue(async () => {
-        await this._pushIndex();
-      }),
-      3_000, // 3s debounce
-    );
-  }
-
-  // -----------------------------------------------------------------------
-  // Chunking (large files >60KB)
-  // -----------------------------------------------------------------------
-
-  private chunkEncrypt(plaintext: string): string {
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(plaintext);
-
-    if (bytes.length <= CHUNK_SIZE) {
-      return encryptPayload(this.convKey, plaintext);
-    }
-
-    // Split into chunks
-    const chunks: string[] = [];
-    let offset = 0;
-    while (offset < bytes.length) {
-      // Find safe split point (don't split multi-byte chars)
-      let end = offset + CHUNK_SIZE;
-      if (end < bytes.length) {
-        while (end > offset && (bytes[end]! & 0xc0) === 0x80) end--;
-        if (end === offset) end = offset + CHUNK_SIZE; // fallback
-      } else {
-        end = bytes.length;
-      }
-      chunks.push(new TextDecoder().decode(bytes.slice(offset, end)));
-      offset = end;
-    }
-
-    // Encrypt header + each chunk, join with '.'
-    const header = `${CHUNK_HEADER_PREFIX}${chunks.length}}`;
-    const parts = [encryptPayload(this.convKey, header)];
-    for (const chunk of chunks) {
-      parts.push(encryptPayload(this.convKey, chunk));
-    }
-    return parts.join(".");
-  }
-
-  /**
-   * Decrypt a possibly-chunked NIP-44 payload.
-   * Public so tests can verify round-trips.
-   */
-  chunkDecrypt(ciphertext: string): string {
-    if (!ciphertext.includes(".")) {
-      return decryptPayload(this.convKey, ciphertext);
-    }
-
-    // Split on '.' — safe because base64 has no '.'
-    const parts = ciphertext.split(".");
-    const header = decryptPayload(this.convKey, parts[0]!);
-
-    if (!header.startsWith(CHUNK_HEADER_PREFIX)) {
-      throw new Error("Invalid chunk header");
-    }
-
-    const total = parseInt(
-      header.slice(CHUNK_HEADER_PREFIX.length).replace("}", ""),
-      10,
-    );
-    if (isNaN(total) || parts.length !== total + 1) {
-      throw new Error(`Chunk count mismatch: expected ${total}, got ${parts.length - 1}`);
-    }
-
-    const chunks = parts.slice(1).map((p) => decryptPayload(this.convKey, p));
-    return chunks.join("");
   }
 
   // -----------------------------------------------------------------------
@@ -445,8 +347,7 @@ export class SyncEngine {
       const dTag = event.tags.find((t: string[]) => t[0] === "d");
       if (!dTag?.[1]) return;
 
-      // Decrypt (handles chunked payloads)
-      const decrypted = this.chunkDecrypt(event.content);
+      const decrypted = decryptPayload(this.convKey, event.content);
       const payload: FilePayload = JSON.parse(decrypted);
 
       // Integrity check: d-tag must match the hash of the decrypted path.
@@ -495,13 +396,7 @@ export class SyncEngine {
 
     // Skip non-text files by extension (common Obsidian binary types)
     const ext = path.split(".").pop()?.toLowerCase() ?? "";
-    const skipExts = new Set([
-      "png", "jpg", "jpeg", "gif", "webp", "svg", "ico",
-      "pdf", "mp4", "mp3", "ogg", "wav", "webm",
-      "zip", "gz", "tar", "7z",
-      "excalidraw", // Excalidraw JSON is syncable, but the lib file isn't
-    ]);
-    if (skipExts.has(ext)) return false;
+    if (SKIP_EXTS.has(ext)) return false;
 
     // Canvas files (.canvas) ARE syncable — they're JSON
     // Markdown (.md) IS syncable — it's the primary type
@@ -516,12 +411,4 @@ export class SyncEngine {
     });
   }
 
-  /** Reset in-memory state without disconnecting from relays. */
-  reset(): void {
-    this.files.clear();
-    if (this.indexPushTimer) clearTimeout(this.indexPushTimer);
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    for (const id of this.subIds) this.relay.unsubscribe(id);
-    this.subIds = [];
-  }
 }

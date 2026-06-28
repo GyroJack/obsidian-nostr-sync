@@ -8,7 +8,6 @@ export class RelayPool {
   private pool = new SimplePool();
   private urls: Set<string>;
   private subs = new Map<string, { close: () => void }>();
-  connected = false;
 
   /** @param urls Initial relay WebSocket URLs. Invalid URLs are ignored. */
   constructor(urls: string[]) {
@@ -23,7 +22,6 @@ export class RelayPool {
 
   /** Open connections to all configured relays; failures are swallowed per relay. */
   async connect(): Promise<void> {
-    this.connected = true;
     const arr = Array.from(this.urls);
     await Promise.all(
       arr.map((url) => this.pool.ensureRelay(url).catch(() => {})),
@@ -63,6 +61,5 @@ export class RelayPool {
     for (const [, sub] of Array.from(this.subs)) sub.close();
     this.subs.clear();
     this.pool.close(Array.from(this.urls));
-    this.connected = false;
   }
 }

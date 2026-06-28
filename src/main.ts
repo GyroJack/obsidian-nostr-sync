@@ -2,10 +2,9 @@
  * obsidian-nostr-sync — encrypted vault sync via Nostr relays.
  */
 import { Plugin, Notice } from "obsidian";
-import { nip19, getPublicKey } from "nostr-tools";
 import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
 import type { NostrSyncSettings } from "./types";
-import { wrapNsec, unwrapNsec } from "./crypto/encryption";
+import { unwrapNsec } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
 import { VaultWatcher } from "./sync/watcher";
 import type { FileChangeEvent } from "./sync/watcher";
@@ -20,8 +19,6 @@ const DEFAULTS: NostrSyncSettings = {
   syncEnabled: false,
   syncStatus: "locked",
 };
-
-const MIN_PASSPHRASE_LENGTH = 8;
 
 export default class NostrSyncPlugin extends Plugin {
   declare settings: NostrSyncSettings;
@@ -163,44 +160,4 @@ export default class NostrSyncPlugin extends Plugin {
     }
   }
 
-  // ── Registration ──────────────────────────────────
-
-  /**
-   * Store a new nsec and start syncing. Called from settings UI or onboarding.
-   * Validates minimum passphrase length before encrypting.
-   */
-  async storeNsec(nsec: string, passphrase: string): Promise<void> {
-    if (passphrase.length < MIN_PASSPHRASE_LENGTH) {
-      throw new Error(
-        `Passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters`,
-      );
-    }
-
-    let nsecBytes: Uint8Array;
-    if (nsec.startsWith("nsec")) {
-      const decoded = nip19.decode(nsec);
-      if (decoded.type !== "nsec") throw new Error("Invalid nsec key");
-      nsecBytes = decoded.data;
-    } else if (/^[0-9a-fA-F]{64}$/.test(nsec)) {
-      nsecBytes = new Uint8Array(
-        nsec.match(/.{1,2}/g)!.map((b) => parseInt(b, 16)),
-      );
-    } else {
-      throw new Error(
-        "Invalid nsec — must be an nsec1... bech32 key or 64 hex characters",
-      );
-    }
-
-    const { salt, encrypted } = await wrapNsec(nsecBytes, passphrase);
-    const pubkey = getPublicKey(nsecBytes);
-
-    this.settings.encryptedNsec = encrypted;
-    this.settings.salt          = salt;
-    this.settings.pubkey        = pubkey;
-    this.settings.syncEnabled   = true;
-    await this.saveSettings();
-
-    await this.startSync(nsecBytes);
-    new Notice(`Nostr Sync: registered with pubkey ${pubkey.slice(0, 12)}...`);
-  }
 }
