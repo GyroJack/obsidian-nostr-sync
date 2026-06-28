@@ -47,4 +47,4 @@ src/
 | 30801 | Vault Index | NIP-44 (self) |
 | 30802 | Shared Doc | NIP-44 (recipient) |
 
-Files are encrypted before leaving the device. Relays see only ciphertext in event `content` fields, with cleartext file paths in `d` tags.
+Files are encrypted before leaving the device. Relays see only ciphertext in event `content` fields; file paths are replaced by SHA-256 hashes in `d` tags to avoid metadata leaks.

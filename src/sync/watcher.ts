@@ -24,6 +24,7 @@ export class VaultWatcher {
     this.handler = handler;
   }
 
+  /** Attach Obsidian vault event listeners. */
   start(): void {
     this.vault.on("modify", (file: TAbstractFile) => {
       this.debounce(file.path, "modify");
@@ -39,6 +40,7 @@ export class VaultWatcher {
     });
   }
 
+  /** Clear pending debounce timers. Obsidian cleans up the event refs on unload. */
   stop(): void {
     // Obsidian's vault.on() returns EventRef, which we don't need to track
     // for stop — the plugin's onunload() handles cleanup via Obsidian internals.

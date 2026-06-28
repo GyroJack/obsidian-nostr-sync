@@ -2,7 +2,7 @@
  * SyncEngine — orchestrates encrypted file sync over Nostr relays.
  *
  * Protocol (Onyx-compatible):
- *   - kind 30800 = encrypted file (d-tag = cleartext path)
+ *   - kind 30800 = encrypted file (d-tag = SHA-256 of path, content encrypted)
  *   - kind 30801 = encrypted vault index (d-tag = vault id)
  */
 
@@ -65,6 +65,11 @@ export class SyncEngine {
   // Constructor
   // -----------------------------------------------------------------------
 
+  /**
+   * @param vault Obsidian vault instance.
+   * @param privkey Nostr secret key bytes or hex string. If omitted, a random key is generated.
+   * @param relays WebSocket relay URLs.
+   */
   constructor(
     private vault: Vault,
     privkey?: Uint8Array | string,
@@ -87,6 +92,7 @@ export class SyncEngine {
     );
   }
 
+  /** The public key (hex) derived from the configured private key. */
   get publicKey(): string {
     return this.pubkey;
   }
@@ -95,6 +101,7 @@ export class SyncEngine {
   // Lifecycle
   // -----------------------------------------------------------------------
 
+  /** Connect to relays and subscribe to remote file/index events. */
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
@@ -102,6 +109,7 @@ export class SyncEngine {
     await this.connectWithRetry();
   }
 
+  /** Disconnect from relays and stop all subscriptions and timers. */
   stop(): void {
     this.started = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -111,7 +119,7 @@ export class SyncEngine {
     this.relay.disconnect();
   }
 
-  /** Replace relay list at runtime. Reconnects on new URLs. */
+  /** Replace the relay list at runtime and reconnect. */
   updateRelays(relays: string[]): void {
     this.relay.setUrls(relays);
     void this.connectWithRetry();
@@ -128,9 +136,7 @@ export class SyncEngine {
       await this.subscribeAll();
     } catch {
       if (!this.started) return;
-      console.warn(
-        `nostr-sync: relay connect failed, retry in ${this.retryBackoff / 1000}s`,
-      );
+      // Silently back off and retry — relay disconnects should not spam the user.
       this.reconnectTimer = setTimeout(
         () => void this.connectWithRetry(),
         this.retryBackoff,
@@ -143,14 +149,17 @@ export class SyncEngine {
   // Push: local → remote
   // -----------------------------------------------------------------------
 
-  /** Push a file to relays. Serialized via internal op queue. */
+  /**
+   * Push a file's current content to relays.
+   * The call is serialized via an internal operation queue.
+   */
   async pushFile(path: string): Promise<void> {
     await this.enqueue(async () => {
       await this._pushFile(path);
     });
   }
 
-  /** Mark a file as deleted. */
+  /** Mark a file as deleted and publish an updated vault index. */
   async handleDelete(path: string): Promise<void> {
     await this.enqueue(async () => {
       this.files.delete(path);
@@ -158,7 +167,7 @@ export class SyncEngine {
     });
   }
 
-  /** Handle a file rename (old path → new path). */
+  /** Handle a file rename (old path → new path), preserving history in the index. */
   async handleRename(oldPath: string, newPath: string): Promise<void> {
     await this.enqueue(async () => {
       // Remove old entry
@@ -204,14 +213,14 @@ export class SyncEngine {
     const plaintext = JSON.stringify(payload);
     const encrypted = this.chunkEncrypt(plaintext);
 
+    // Use a hash of the path as the d-tag so relays cannot read file names.
+    const pathHash = await sha256(path);
+
     const unsigned = {
       kind: FILE_KIND,
       pubkey: this.pubkey,
       created_at: now,
-      tags: [
-        ["d", path],
-        ["checksum", checksum],
-      ],
+      tags: [["d", pathHash]],
       content: encrypted,
     };
     const signed = finalizeEvent(unsigned, this.privkey);
@@ -315,7 +324,10 @@ export class SyncEngine {
     return parts.join(".");
   }
 
-  /** Decrypt possibly-chunked payload. Public so tests can verify. */
+  /**
+   * Decrypt a possibly-chunked NIP-44 payload.
+   * Public so tests can verify round-trips.
+   */
   chunkDecrypt(ciphertext: string): string {
     if (!ciphertext.includes(".")) {
       return decryptPayload(this.convKey, ciphertext);
@@ -380,7 +392,7 @@ export class SyncEngine {
       limit: MAX_FETCH_LIMIT,
     };
     const sid1 = this.relay.subscribe(
-      [idxFilter],
+      idxFilter,
       (e) => void this.onRemoteIndex(e),
     );
     this.subIds.push(sid1);
@@ -392,7 +404,7 @@ export class SyncEngine {
       limit: MAX_FETCH_LIMIT,
     };
     const sid2 = this.relay.subscribe(
-      [fileFilter],
+      fileFilter,
       (e) => void this.onRemoteFile(e),
     );
     this.subIds.push(sid2);
@@ -428,40 +440,41 @@ export class SyncEngine {
 
   private async onRemoteFile(event: Event): Promise<void> {
     try {
+      // Require a d-tag (SHA-256 of the path) per protocol, but resolve the
+      // actual path from the encrypted payload so file names never leak.
       const dTag = event.tags.find((t: string[]) => t[0] === "d");
-      if (!dTag) return;
-
-      const path        = dTag[1]!;
-      const checksumTag = event.tags.find(
-        (t: string[]) => t[0] === "checksum",
-      )?.[1] ?? "";
-      const known = this.files.get(path);
-      if (known && known.checksum === checksumTag) return;
+      if (!dTag?.[1]) return;
 
       // Decrypt (handles chunked payloads)
       const decrypted = this.chunkDecrypt(event.content);
       const payload: FilePayload = JSON.parse(decrypted);
 
+      // Integrity check: d-tag must match the hash of the decrypted path.
+      if (dTag[1] !== (await sha256(payload.path))) return;
+
+      const known = this.files.get(payload.path);
+      if (known && known.checksum === payload.checksum) return;
+
       const computed = await sha256(payload.content);
       if (computed !== payload.checksum) {
-        console.warn(`nostr-sync: checksum mismatch for ${path}`);
+        // Drop malformed/ tampered events silently.
         return;
       }
 
       // Create parent directories if needed
-      const dir = path.substring(0, path.lastIndexOf("/"));
+      const dir = payload.path.substring(0, payload.path.lastIndexOf("/"));
       if (dir && !(await this.vault.adapter.exists(dir))) {
         await this.vault.createFolder(dir);
       }
 
-      const exists = await this.vault.adapter.exists(path);
+      const exists = await this.vault.adapter.exists(payload.path);
       if (exists) {
-        await this.vault.adapter.write(path, payload.content);
+        await this.vault.adapter.write(payload.path, payload.content);
       } else {
-        await this.vault.create(path, payload.content);
+        await this.vault.create(payload.path, payload.content);
       }
 
-      this.files.set(path, {
+      this.files.set(payload.path, {
         eventId: event.id!,
         checksum: payload.checksum,
         version: payload.version,
@@ -496,14 +509,14 @@ export class SyncEngine {
     return true;
   }
 
-  /** Force-rebuild the vault index and push to relays */
+  /** Force-rebuild the vault index and push it to relays. */
   async rebuildIndex(): Promise<void> {
     await this.enqueue(async () => {
       await this._pushIndex();
     });
   }
 
-  /** Reset all local state (for testing or key rotation) */
+  /** Reset in-memory state without disconnecting from relays. */
   reset(): void {
     this.files.clear();
     if (this.indexPushTimer) clearTimeout(this.indexPushTimer);

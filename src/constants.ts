@@ -23,3 +23,14 @@ export const SYNC_DEBOUNCE_MS = 3_000;
 
 /** Max events to fetch in a single relay query */
 export const MAX_FETCH_LIMIT = 500;
+
+/** Validate a relay URL: must be a ws:// or wss:// WebSocket URL. */
+export function isValidRelayUrl(url: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "wss:" || parsed.protocol === "ws:";
+  } catch {
+    return false;
+  }
+}

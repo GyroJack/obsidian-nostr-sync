@@ -77,7 +77,7 @@ export async function wrapNsec(
   const iv   = crypto.getRandomValues(new Uint8Array(IV_LEN));
 
   const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, nsecBytes as BufferSource);
-  const arr = new Uint8Array(ct as ArrayBuffer);
+  const arr = new Uint8Array(ct);
 
   // iv || ciphertext
   const buf = new Uint8Array(IV_LEN + arr.length);
@@ -107,7 +107,7 @@ export async function unwrapNsec(
   const key        = await deriveWrappingKey(passphrase, salt);
 
   const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext as BufferSource);
-  return new Uint8Array(pt as ArrayBuffer);
+  return new Uint8Array(pt);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,16 +134,15 @@ export function encryptPayload(
   plaintext: string,
 ): string {
   // NIP-44 requires at least 1 byte — guard empty strings
-  if (!plaintext) return nip44.encrypt(" ", conversationKey) as string;
-  return nip44.encrypt(plaintext, conversationKey) as string;
+  if (!plaintext) return nip44.encrypt(" ", conversationKey);
+  return nip44.encrypt(plaintext, conversationKey);
 }
 
 export function decryptPayload(
   conversationKey: Uint8Array,
   ciphertext: string,
 ): string {
-  // nip44.decrypt(ciphertext, conversationKey)
-  return nip44.decrypt(ciphertext, conversationKey) as string;
+  return nip44.decrypt(ciphertext, conversationKey);
 }
 
 // ---------------------------------------------------------------------------

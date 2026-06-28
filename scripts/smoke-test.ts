@@ -2,7 +2,7 @@
  * Quick relay diagnostic — can we pub/sub kind 30800?
  * Run: npx tsx scripts/smoke-test.ts
  */
-import { generateSecretKey, getPublicKey, finalizeEvent, SimplePool } from "nostr-tools";
+import { generateSecretKey, getPublicKey, finalizeEvent, SimplePool, type Event } from "nostr-tools";
 import { deriveConversationKey, encryptPayload, sha256 } from "../src/crypto/encryption";
 
 const RELAYS = [
@@ -29,11 +29,11 @@ async function testRelay(relay: string, sk: Uint8Array, pk: string, ck: Uint8Arr
     await new Promise(r => setTimeout(r, 3000));
 
     // Broad filter — no #d restriction
-    const events: any[] = [];
-    await new Promise<void>((resolve, reject) => {
+    const events: Event[] = [];
+    await new Promise<void>((resolve) => {
       const t = setTimeout(() => resolve(), 5000); // 5s max
       const sub = pool.subscribeMany([relay], [{ kinds: [30800], authors: [pk], limit: 5 }], {
-        onevent: (e: any) => { events.push(e); sub.close(); clearTimeout(t); resolve(); },
+        onevent: (e: Event) => { events.push(e); sub.close(); clearTimeout(t); resolve(); },
         oneose: () => { clearTimeout(t); resolve(); },
       });
     });

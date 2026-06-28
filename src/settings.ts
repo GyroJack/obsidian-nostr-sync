@@ -2,8 +2,9 @@
  * SettingsTab — plugin configuration UI in Obsidian's Settings panel.
  */
 import { App, PluginSettingTab, Setting } from "obsidian";
-import { DEFAULT_RELAYS, PLUGIN_ID } from "./constants";
+import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
 import type { NostrSyncSettings } from "./types";
+import type NostrSyncPlugin from "./main";
 
 export class SettingsTab extends PluginSettingTab {
   private settings: NostrSyncSettings;
@@ -12,11 +13,12 @@ export class SettingsTab extends PluginSettingTab {
 
   constructor(
     app: App,
+    plugin: NostrSyncPlugin,
     settings: NostrSyncSettings,
     saveFn: () => Promise<void>,
     clearNsecFn: () => void,
   ) {
-    super(app, { id: PLUGIN_ID } as any);
+    super(app, plugin);
     this.settings     = settings;
     this.saveFn       = saveFn;
     this.clearNsecFn  = clearNsecFn;
@@ -92,7 +94,7 @@ export class SettingsTab extends PluginSettingTab {
         this.settings.relays = val
           .split("\n")
           .map((s) => s.trim())
-          .filter((s) => s.startsWith("wss://"));
+          .filter(isValidRelayUrl);
         await this.saveFn();
       });
       return ta;

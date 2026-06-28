@@ -3,7 +3,7 @@
  */
 import { Plugin, Notice } from "obsidian";
 import { nip19, getPublicKey } from "nostr-tools";
-import { DEFAULT_RELAYS } from "./constants";
+import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
 import type { NostrSyncSettings } from "./types";
 import { wrapNsec, unwrapNsec } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
@@ -29,29 +29,35 @@ export default class NostrSyncPlugin extends Plugin {
   private watcher!: VaultWatcher;
 
   override async onload(): Promise<void> {
-    await this.loadSettings();
+    try {
+      await this.loadSettings();
 
-    this.addSettingTab(
-      new SettingsTab(
-        this.app,
-        this.settings,
-        () => this.saveSettings(),
-        () => this.clearStoredKey(),
-      ),
-    );
+      this.addSettingTab(
+        new SettingsTab(
+          this.app,
+          this,
+          this.settings,
+          () => this.saveSettings(),
+          () => this.clearStoredKey(),
+        ),
+      );
 
-    if (this.settings.syncEnabled && this.settings.encryptedNsec) {
-      await this.unlockAndStart();
+      if (this.settings.syncEnabled && this.settings.encryptedNsec) {
+        await this.unlockAndStart();
+      }
+
+      this.addCommand({
+        id: "sync-now",
+        name: "Sync Now",
+        callback: () => {
+          new Notice("Nostr Sync: checking for remote changes...");
+          void this.engine?.rebuildIndex();
+        },
+      });
+    } catch (err) {
+      new Notice("Nostr Sync: failed to start. Check the developer console.", 0);
+      console.error("Nostr Sync: onload failed", err);
     }
-
-    this.addCommand({
-      id: "sync-now",
-      name: "Sync Now",
-      callback: () => {
-        new Notice("Nostr Sync: checking for remote changes...");
-        void this.engine?.rebuildIndex();
-      },
-    });
   }
 
   override onunload(): void {
@@ -61,14 +67,17 @@ export default class NostrSyncPlugin extends Plugin {
 
   // ── Settings ──────────────────────────────────────
 
+  /** Load persisted settings from Obsidian's data store. */
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());
   }
 
+  /** Persist current settings to Obsidian's data store. */
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
   }
 
+  /** Remove the encrypted nsec, salt, and pubkey from settings and stop sync. */
   clearStoredKey(): void {
     this.settings.encryptedNsec = "";
     this.settings.salt          = "";
@@ -118,7 +127,7 @@ export default class NostrSyncPlugin extends Plugin {
     this.engine = new SyncEngine(
       this.app.vault,
       nsecBytes,
-      this.settings.relays.filter((r) => r.startsWith("wss://") || r.startsWith("ws://")),
+      this.settings.relays.filter(isValidRelayUrl),
     );
 
     this.watcher = new VaultWatcher(this.app.vault, (e: FileChangeEvent) =>
@@ -148,9 +157,9 @@ export default class NostrSyncPlugin extends Plugin {
           }
           break;
       }
-    } catch (err) {
-      // Don't crash on file-sync errors — log and continue
-      console.debug("nostr-sync: error handling file change:", e.path, err);
+    } catch {
+      // Swallow file-sync errors so a single bad file doesn't crash the plugin.
+      // No sensitive data (paths, content, keys) is logged.
     }
   }
 
