@@ -89,11 +89,7 @@ export class SyncEngine {
   /** Called when relay health data changes. */
   onHealthChange: ((health: RelayHealth[]) => void) | null = null;
 
-  /** Called when a sync operation starts. */
-  onSyncStart: (() => void) | null = null;
-
-  /** Called when a sync operation ends (success or failure). */
-  onSyncEnd: (() => void) | null = null;
+  // (onSyncStart/onSyncEnd removed in v2 — batch push uses interval-based sync now)
 
   // -----------------------------------------------------------------------
   // Constructor
@@ -216,48 +212,30 @@ export class SyncEngine {
    * The call is serialized via an internal operation queue.
    */
   async pushFile(path: string): Promise<void> {
-    this.onSyncStart?.();
-    try {
-      await this.enqueue(async () => {
-        await this._pushFile(path);
-      });
-    } finally {
-      this.onSyncEnd?.();
-    }
+    await this.enqueue(async () => {
+      await this._pushFile(path);
+    });
   }
 
   /** Mark a file as deleted and publish an updated vault index. */
   async handleDelete(path: string): Promise<void> {
-    this.onSyncStart?.();
-    try {
-      await this.enqueue(async () => {
-        this.files.delete(path);
-        this.logActivity(path, "deleted");
-        await this._pushIndex();
-      });
-    } finally {
-      this.onSyncEnd?.();
-    }
+    await this.enqueue(async () => {
+      this.files.delete(path);
+      this.logActivity(path, "deleted");
+      await this._pushIndex();
+    });
   }
 
   /** Handle a file rename (old path → new path), preserving history in the index. */
   async handleRename(oldPath: string, newPath: string): Promise<void> {
-    this.onSyncStart?.();
-    try {
-      await this.enqueue(async () => {
-        // Remove old entry
-        this.files.delete(oldPath);
-        // Push new file (if exists)
-        const exists = await this.vault.adapter.exists(newPath);
-        if (exists) {
-          await this._pushFile(newPath);
-        }
-        // Publish index with tombstone for old
-        await this._pushIndex([oldPath]);
-      });
-    } finally {
-      this.onSyncEnd?.();
-    }
+    await this.enqueue(async () => {
+      this.files.delete(oldPath);
+      const exists = await this.vault.adapter.exists(newPath);
+      if (exists) {
+        await this._pushFile(newPath);
+      }
+      await this._pushIndex([oldPath]);
+    });
   }
 
   // -----------------------------------------------------------------------
@@ -409,7 +387,7 @@ export class SyncEngine {
    * Push all local syncable files that are missing from or newer than
    * the remote state. Called once after initial connect to catch up.
    */
-  private async syncAllLocalFiles(): Promise<void> {
+  async syncAllLocalFiles(): Promise<void> {
     const allFiles = this.vault.getMarkdownFiles();
 
     for (const file of allFiles) {

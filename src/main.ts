@@ -8,8 +8,6 @@ import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo, SyncActi
 import { ConflictModal } from "./modals/conflict-modal";
 import { unwrapNsec, wrapNsec } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
-import { VaultWatcher } from "./sync/watcher";
-import type { FileChangeEvent } from "./sync/watcher";
 import { SettingsTab } from "./settings";
 import { PassphraseModal } from "./modals";
 
@@ -27,7 +25,7 @@ const DEFAULTS: NostrSyncSettings = {
 export default class NostrSyncPlugin extends Plugin {
   declare settings: NostrSyncSettings;
   private engine!: SyncEngine;
-  private watcher!: VaultWatcher;
+  private _syncTimer: ReturnType<typeof setInterval> | null = null;
   private statusBarItem: HTMLElement | null = null;
   private statusDebounce: ReturnType<typeof setTimeout> | null = null;
 
@@ -75,14 +73,9 @@ export default class NostrSyncPlugin extends Plugin {
             new Notice("❌ Nostr Sync: engine not started. Register a key first.");
             return;
           }
-          new Notice("🔄 Syncing...");
-          this.setSyncStatus("syncing");
-          void this.engine.rebuildIndex().then(() => {
-            this.setSyncStatus("idle");
-            new Notice("✅ Sync complete");
-          }).catch(() => {
-            this.setSyncStatus("idle");
-            new Notice("❌ Sync failed");
+          new Notice("🔄 Nostr Sync: syncing...");
+          void this.syncNow().then(() => {
+            new Notice("✅ Nostr Sync: complete");
           });
         },
       });
@@ -92,9 +85,21 @@ export default class NostrSyncPlugin extends Plugin {
     }
   }
 
-  override onunload(): void {
-    this.watcher?.stop();
-    this.engine?.stop();
+  override async onunload(): Promise<void> {
+    // Stop interval timer
+    if (this._syncTimer) {
+      clearInterval(this._syncTimer);
+      this._syncTimer = null;
+    }
+    // Push final state before disconnecting
+    if (this.engine) {
+      try {
+        await this.engine.rebuildIndex();
+      } catch {
+        // Best effort on shutdown
+      }
+      this.engine.stop();
+    }
   }
 
   // ── Settings ──────────────────────────────────────
@@ -222,47 +227,38 @@ export default class NostrSyncPlugin extends Plugin {
     // Wire conflict detection
     this.engine.onConflict = (info) => this.showConflictModal(info);
 
-    // Wire sync state
-    this.engine.onSyncStart = () => this.setSyncStatus("syncing");
-    this.engine.onSyncEnd = () => this.setSyncStatus("idle");
-
-    this.watcher = new VaultWatcher(this.app.vault, (e: FileChangeEvent) =>
-      this.handleFileChange(e),
-    );
-
-    this.watcher.start();
     await this.engine.start();
+
+    // Do an initial sync on startup
+    await this.syncNow();
+
+    // Set up 5-minute auto-sync interval
+    this._syncTimer = setInterval(() => {
+      void this.syncNow();
+    }, 5 * 60 * 1000);
   }
 
-  /** Bridges VaultWatcher events to SyncEngine */
-  private async handleFileChange(e: FileChangeEvent): Promise<void> {
+  /**
+   * Full sync cycle: push all local changes to relays.
+   * Pull happens automatically via active subscriptions.
+   */
+  private async syncNow(): Promise<void> {
+    if (!this.engine) return;
+    this.setSyncStatus("syncing");
     try {
-      switch (e.action) {
-        case "modify":
-        case "create":
-          await this.engine.pushFile(e.path);
-          break;
-        case "delete":
-          await this.engine.handleDelete(e.path);
-          break;
-        case "rename":
-          if (e.oldPath) {
-            await this.engine.handleRename(e.oldPath, e.path);
-          } else {
-            await this.engine.pushFile(e.path);
-          }
-          break;
-      }
+      await this.engine.syncAllLocalFiles();
+      await this.engine.rebuildIndex();
+      this.setSyncStatus("idle");
     } catch (e) {
-      console.warn("nostr-sync: file change handler failed", e);
+      console.warn("nostr-sync: sync cycle failed", e);
+      this.setSyncStatus("error");
     }
   }
 
   // ── Status Bar ────────────────────────────────────
 
   private setSyncStatus(status: SyncStatus): void {
-    // Debounce: rapid onSyncStart/onSyncEnd per-file callbacks should not
-    // thrash the DOM — only the final status in the batch matters.
+    // Debounce: avoid rapid DOM updates during sync cycles.
     if (this.statusDebounce) clearTimeout(this.statusDebounce);
     this.statusDebounce = setTimeout(() => {
       this.statusDebounce = null;
