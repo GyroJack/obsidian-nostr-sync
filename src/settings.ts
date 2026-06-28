@@ -10,6 +10,7 @@ export class SettingsTab extends PluginSettingTab {
   private settings: NostrSyncSettings;
   private saveFn: () => Promise<void>;
   private clearNsecFn: () => void;
+  private storeNsecFn: (nsec: string, passphrase: string) => Promise<void>;
 
   constructor(
     app: App,
@@ -17,11 +18,13 @@ export class SettingsTab extends PluginSettingTab {
     settings: NostrSyncSettings,
     saveFn: () => Promise<void>,
     clearNsecFn: () => void,
+    storeNsecFn: (nsec: string, passphrase: string) => Promise<void>,
   ) {
     super(app, plugin);
     this.settings     = settings;
     this.saveFn       = saveFn;
     this.clearNsecFn  = clearNsecFn;
+    this.storeNsecFn  = storeNsecFn;
   }
 
   override display(): void {
@@ -52,33 +55,82 @@ export class SettingsTab extends PluginSettingTab {
           }),
       );
 
-    // ── Public key ──────────────────────────────────
-    new Setting(containerEl)
-      .setName("Public key")
-      .setDesc("Your Nostr public key (npub)")
-      .addText((t) =>
-        t
-          .setValue(this.settings.pubkey || "")
-          .setDisabled(true),
-      );
+    if (this.settings.encryptedNsec) {
+      // ── Public key ──────────────────────────────────
+      new Setting(containerEl)
+        .setName("Public key")
+        .setDesc("Your Nostr public key (npub)")
+        .addText((t) =>
+          t
+            .setValue(this.settings.pubkey || "")
+            .setDisabled(true),
+        );
 
-    // ── Passphrase / Reset ──────────────────────────
-    new Setting(containerEl)
-      .setName("Reset keys")
-      .setDesc(
-        this.settings.encryptedNsec
-          ? "Remove the stored secret key. You'll need your nsec to re-register."
-          : "No secret key stored yet.",
-      )
-      .addButton((btn) => {
-        btn
-          .setButtonText(this.settings.encryptedNsec ? "Clear Key" : "Set Key")
-          .onClick(() => {
-            this.clearNsecFn();
-            containerEl.empty();
-            this.display();
-          });
+      // ── Passphrase / Reset ──────────────────────────
+      new Setting(containerEl)
+        .setName("Reset keys")
+        .setDesc(
+          "Remove the stored secret key. You'll need your nsec to re-register.",
+        )
+        .addButton((btn) => {
+          btn
+            .setButtonText("Clear Key")
+            .onClick(() => {
+              this.clearNsecFn();
+              containerEl.empty();
+              this.display();
+            });
+        });
+    } else {
+      // ── Register key ────────────────────────────────
+      let nsecValue = "";
+      let passphraseValue = "";
+
+      containerEl.createEl("h3", { text: "Register key" });
+      containerEl.createEl("p", {
+        text: "Enter your nsec and a strong passphrase to encrypt it.",
       });
+
+      new Setting(containerEl)
+        .setName("Secret key (nsec)")
+        .setDesc("Your Nostr secret key, starting with nsec1...")
+        .addText((t) => {
+          t.setPlaceholder("nsec1...");
+          t.inputEl.type = "password";
+          t.onChange((v) => {
+            nsecValue = v;
+          });
+        });
+
+      new Setting(containerEl)
+        .setName("Passphrase")
+        .setDesc("At least 8 characters. Required to unlock on startup.")
+        .addText((t) => {
+          t.setPlaceholder("Enter passphrase...");
+          t.inputEl.type = "password";
+          t.onChange((v) => {
+            passphraseValue = v;
+          });
+        });
+
+      new Setting(containerEl)
+        .setName("Register")
+        .setDesc("Save the encrypted key and start syncing.")
+        .addButton((btn) => {
+          btn
+            .setButtonText("Register")
+            .setCta()
+            .onClick(async () => {
+              try {
+                await this.storeNsecFn(nsecValue, passphraseValue);
+                containerEl.empty();
+                this.display();
+              } catch {
+                // Error notices are shown by the plugin.
+              }
+            });
+        });
+    }
 
     // ── Relays ──────────────────────────────────────
     containerEl.createEl("h3", { text: "Relays" });

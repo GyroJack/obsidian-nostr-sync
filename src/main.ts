@@ -2,9 +2,10 @@
  * obsidian-nostr-sync — encrypted vault sync via Nostr relays.
  */
 import { Plugin, Notice } from "obsidian";
+import { nip19, getPublicKey } from "nostr-tools";
 import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
 import type { NostrSyncSettings } from "./types";
-import { unwrapNsec } from "./crypto/encryption";
+import { unwrapNsec, wrapNsec } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
 import { VaultWatcher } from "./sync/watcher";
 import type { FileChangeEvent } from "./sync/watcher";
@@ -36,6 +37,7 @@ export default class NostrSyncPlugin extends Plugin {
           this.settings,
           () => this.saveSettings(),
           () => this.clearStoredKey(),
+          (nsec, passphrase) => this.storeNsec(nsec, passphrase),
         ),
       );
 
@@ -83,6 +85,55 @@ export default class NostrSyncPlugin extends Plugin {
     this.engine?.stop();
     void this.saveSettings();
     new Notice("Nostr Sync: key cleared.");
+  }
+
+  /**
+   * Register a new nsec with a passphrase.
+   * Validates the key, wraps it with the passphrase, derives the pubkey,
+   * persists settings, and starts the sync engine.
+   */
+  async storeNsec(nsec: string, passphrase: string): Promise<void> {
+    if (passphrase.length < 8) {
+      new Notice(
+        "Nostr Sync: passphrase must be at least 8 characters.",
+        6000,
+      );
+      throw new Error("Passphrase too short");
+    }
+
+    let nsecBytes: Uint8Array;
+    try {
+      if (nsec.startsWith("nsec1")) {
+        const decoded = nip19.decode(nsec);
+        if (decoded.type !== "nsec") throw new Error("Invalid nsec");
+        nsecBytes = decoded.data as Uint8Array;
+      } else if (/^[0-9a-fA-F]{64}$/.test(nsec)) {
+        nsecBytes = new Uint8Array(32);
+        for (let i = 0; i < 64; i += 2) {
+          nsecBytes[i / 2] = parseInt(nsec.substring(i, i + 2), 16);
+        }
+      } else {
+        throw new Error("Invalid nsec format");
+      }
+    } catch {
+      new Notice(
+        "Nostr Sync: invalid nsec format. Use nsec1... or 64-char hex.",
+        8000,
+      );
+      throw new Error("Invalid nsec format");
+    }
+
+    const { encrypted, salt } = await wrapNsec(nsecBytes, passphrase);
+    this.settings.encryptedNsec = encrypted;
+    this.settings.salt          = salt;
+    this.settings.pubkey        = getPublicKey(nsecBytes);
+    this.settings.syncEnabled   = true;
+    await this.saveSettings();
+
+    await this.startSync(nsecBytes);
+    this.settings.syncStatus = "idle";
+    await this.saveSettings();
+    new Notice("Nostr Sync: key registered and syncing");
   }
 
   // ── Unlock ────────────────────────────────────────
