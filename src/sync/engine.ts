@@ -69,6 +69,13 @@ export class SyncEngine {
   private _activityLog: SyncActivityEntry[] = [];
   private readonly MAX_ACTIVITY = 50;
 
+  /** Timer for debounced vault index push (Fix 1). */
+  private _indexPushTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly INDEX_DEBOUNCE_MS = 2_000;
+
+  /** Strictly monotonic timestamp for event created_at (Fix 2). */
+  private _lastEventTime = 0;
+
   // -----------------------------------------------------------------------
   // Callbacks for the main plugin
   // -----------------------------------------------------------------------
@@ -135,6 +142,7 @@ export class SyncEngine {
   stop(): void {
     this.started = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this._indexPushTimer) clearTimeout(this._indexPushTimer);
     for (const id of this.subIds) this.relay.unsubscribe(id);
     this.subIds = [];
     this.relay.disconnect();
@@ -258,7 +266,8 @@ export class SyncEngine {
     if (known && known.checksum === checksum) return;
 
     const version = (known?.version ?? 0) + 1;
-    const now     = Math.floor(Date.now() / 1000);
+    const now     = Math.max(Math.floor(Date.now() / 1000), this._lastEventTime + 1);
+    this._lastEventTime = now;
 
     const payload: FilePayload = {
       path,
@@ -294,7 +303,19 @@ export class SyncEngine {
 
     this.logActivity(path, "pushed");
 
-    await this._pushIndex();
+    // Schedule a debounced index push instead of immediate (Fix 1)
+    this._scheduleIndexPush();
+  }
+
+  /** Schedule a debounced vault-index push (batches rapid file edits). */
+  private _scheduleIndexPush(): void {
+    if (this._indexPushTimer) return; // already scheduled
+    this._indexPushTimer = setTimeout(() => {
+      this._indexPushTimer = null;
+      this.enqueue(async () => {
+        await this._pushIndex();
+      });
+    }, this.INDEX_DEBOUNCE_MS);
   }
 
   private async _pushIndex(deletedPaths: string[] = []): Promise<void> {
@@ -306,7 +327,8 @@ export class SyncEngine {
       modified: Math.floor(Date.now() / 1000),
     }));
 
-    const now = Math.floor(Date.now() / 1000);
+    const now = Math.max(Math.floor(Date.now() / 1000), this._lastEventTime + 1);
+    this._lastEventTime = now;
 
     const indexPayload: VaultIndexPayload = {
       name: "Obsidian Vault",
@@ -345,8 +367,16 @@ export class SyncEngine {
         await this.relay.publish(event);
         return;
       } catch (e) {
-        if (i === attempts - 1) throw e;
-        await new Promise((r) => setTimeout(r, 1_000 * (i + 1)));
+        const msg = e instanceof Error ? e.message : String(e);
+        // Rate-limited: back off harder (Fix 3)
+        const delay = msg.includes("rate-limited")
+          ? 5_000 * (i + 1)  // 5s, 10s, 15s
+          : 1_000 * (i + 1); // 1s, 2s, 3s (original)
+        if (i === attempts - 1) {
+          console.warn("nostr-sync: publish failed after retries:", msg);
+          throw e;
+        }
+        await new Promise((r) => setTimeout(r, delay));
       }
     }
   }

@@ -74,6 +74,14 @@ export class RelayPool {
         this.emitHealth();
         return;
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // "replaced: have newer event" means the relay accepted a newer version.
+        // This is not a failure — treat it as success for our purposes (Fix 3).
+        if (msg.includes("replaced")) {
+          this.updateHealth(h.url, true);
+          this.emitHealth();
+          return;
+        }
         lastError = e instanceof Error ? e : new Error(String(e));
         console.debug("nostr-sync: relay publish failed, trying next", h.url, lastError.message);
         this.updateHealth(h.url, false, undefined, lastError.message);
