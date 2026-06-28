@@ -62,3 +62,23 @@ export interface RelayHealth {
   lastChecked: number;       // Unix timestamp ms
   healthScore: number;       // lower = better, computed
 }
+
+/** Format relay health for display (shared by settings tab and status bar popup). */
+export function formatRelayHealth(h: RelayHealth): { icon: string; latencyStr: string; errorStr: string } {
+  const icon = h.connected ? "✅" : h.consecutiveErrors > 0 ? "🟡" : "❌";
+  const latencyStr = h.latency === -1 ? "—" : `${h.latency}ms`;
+  const errorStr = h.consecutiveErrors > 0 ? ` (${h.consecutiveErrors} errors)` : "";
+  return { icon, latencyStr, errorStr };
+}
+
+/** Conflict resolution choice */
+export type ConflictChoice = "keep-local" | "keep-remote" | "keep-both";
+
+/** Information about a sync conflict for the UI */
+export interface ConflictInfo {
+  path: string;
+  localContent: string;
+  remoteContent: string;
+  localVersion: number;
+  remoteVersion: number;
+}

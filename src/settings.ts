@@ -4,6 +4,7 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
 import type { NostrSyncSettings, RelayHealth } from "./types";
+import { formatRelayHealth } from "./types";
 import type NostrSyncPlugin from "./main";
 
 export class SettingsTab extends PluginSettingTab {
@@ -177,11 +178,11 @@ export class SettingsTab extends PluginSettingTab {
       header.createEl("th", { text: "Errors" });
 
       for (const h of health) {
+        const f = formatRelayHealth(h);
         const row = table.createEl("tr");
-        const statusIcon = h.connected ? "✅" : h.consecutiveErrors > 0 ? "🟡" : "❌";
-        row.createEl("td", { text: statusIcon });
+        row.createEl("td", { text: f.icon });
         row.createEl("td", { text: h.url });
-        row.createEl("td", { text: h.latency === -1 ? "—" : `${h.latency}ms` });
+        row.createEl("td", { text: f.latencyStr });
         row.createEl("td", { text: h.consecutiveErrors > 0 ? `${h.consecutiveErrors}` : "0" });
       }
     }

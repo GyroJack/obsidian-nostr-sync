@@ -3,16 +3,10 @@
  * User picks "Keep Local", "Keep Remote", or "Keep Both".
  */
 import { App, Modal } from "obsidian";
+import type { ConflictInfo, ConflictChoice } from "../types";
 
-export type ConflictChoice = "keep-local" | "keep-remote" | "keep-both";
-
-export interface ConflictInfo {
-  path: string;
-  localContent: string;
-  remoteContent: string;
-  localVersion: number;
-  remoteVersion: number;
-}
+export { ConflictChoice };
+export type { ConflictInfo };
 
 export class ConflictModal extends Modal {
   private resolve!: (choice: ConflictChoice) => void;
@@ -51,7 +45,7 @@ export class ConflictModal extends Modal {
     localCol.createEl("h3", { text: "Local (v" + this.info.localVersion + ")" });
     const localText = localCol.createEl("textarea", {
       text: this.info.localContent,
-      attr: { readonly: "true" },
+      attr: { readonly: true },
     });
     localText.style.width = "100%";
     localText.style.height = "300px";
@@ -64,7 +58,7 @@ export class ConflictModal extends Modal {
     remoteCol.createEl("h3", { text: "Remote (v" + this.info.remoteVersion + ")" });
     const remoteText = remoteCol.createEl("textarea", {
       text: this.info.remoteContent,
-      attr: { readonly: "true" },
+      attr: { readonly: true },
     });
     remoteText.style.width = "100%";
     remoteText.style.height = "300px";

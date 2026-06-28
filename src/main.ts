@@ -3,9 +3,9 @@
  */
 import { Plugin, Notice } from "obsidian";
 import { nip19, getPublicKey } from "nostr-tools";
-import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
-import type { NostrSyncSettings, RelayHealth } from "./types";
-import type { ConflictInfo } from "./modals/conflict-modal";
+import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS } from "./constants";
+import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo } from "./types";
+import { formatRelayHealth } from "./types";
 import { ConflictModal } from "./modals/conflict-modal";
 import { unwrapNsec, wrapNsec } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
@@ -28,6 +28,7 @@ export default class NostrSyncPlugin extends Plugin {
   private engine!: SyncEngine;
   private watcher!: VaultWatcher;
   private statusBarItem: HTMLElement | null = null;
+  private statusDebounce: ReturnType<typeof setTimeout> | null = null;
 
   override async onload(): Promise<void> {
     try {
@@ -200,7 +201,7 @@ export default class NostrSyncPlugin extends Plugin {
 
     // Wire relay health to status bar
     this.engine.onHealthChange = (health) => {
-      const allDown = health.length > 0 && health.every((h) => h.consecutiveErrors >= 5);
+      const allDown = health.length > 0 && health.every((h) => h.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS);
       this.setSyncStatus(allDown ? "offline" : "idle");
     };
 
@@ -238,17 +239,21 @@ export default class NostrSyncPlugin extends Plugin {
           }
           break;
       }
-    } catch {
-      // Swallow file-sync errors so a single bad file doesn't crash the plugin.
-      // No sensitive data (paths, content, keys) is logged.
+    } catch (e) {
+      console.warn("nostr-sync: file change handler failed", e);
     }
   }
 
   // ── Status Bar ────────────────────────────────────
 
-  private setSyncStatus(status: string): void {
-    if (!this.statusBarItem) return;
-    switch (status) {
+  private setSyncStatus(status: SyncStatus): void {
+    // Debounce: rapid onSyncStart/onSyncEnd per-file callbacks should not
+    // thrash the DOM — only the final status in the batch matters.
+    if (this.statusDebounce) clearTimeout(this.statusDebounce);
+    this.statusDebounce = setTimeout(() => {
+      this.statusDebounce = null;
+      if (!this.statusBarItem) return;
+      switch (status) {
       case "locked":
         this.statusBarItem.setText("🔒 Nostr Sync: locked");
         break;
@@ -272,7 +277,8 @@ export default class NostrSyncPlugin extends Plugin {
         break;
       default:
         this.statusBarItem.setText("🔒 Nostr Sync: locked");
-    }
+      }
+    }, 150);
   }
 
   /** Show a notice with relay health info. */
@@ -284,10 +290,8 @@ export default class NostrSyncPlugin extends Plugin {
     }
     const lines = ["Relay Health:"];
     for (const h of health) {
-      const statusIcon = h.connected ? "✅" : h.consecutiveErrors > 0 ? "🟡" : "❌";
-      const latencyStr = h.latency === -1 ? "—" : `${h.latency}ms`;
-      const errorStr = h.consecutiveErrors > 0 ? ` (${h.consecutiveErrors} errors)` : "";
-      lines.push(`${statusIcon} ${h.url} — ${latencyStr}${errorStr}`);
+      const f = formatRelayHealth(h);
+      lines.push(`${f.icon} ${h.url} — ${f.latencyStr}${f.errorStr}`);
     }
     new Notice(lines.join("\n"), 8000);
   }

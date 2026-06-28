@@ -41,23 +41,10 @@ export class RelayPool {
         const start = Date.now();
         try {
           await this.pool.ensureRelay(url);
-          const latency = Date.now() - start;
-          const h = this.health.get(url);
-          if (h) {
-            h.connected = true;
-            h.latency = latency;
-            h.lastChecked = Date.now();
-            h.consecutiveErrors = 0;
-            h.healthScore = this.computeHealthScore(h);
-          }
+          this.updateHealth(url, true, Date.now() - start);
         } catch {
-          const h = this.health.get(url);
-          if (h) {
-            h.connected = false;
-            h.consecutiveErrors++;
-            h.lastChecked = Date.now();
-            h.healthScore = this.computeHealthScore(h);
-          }
+          console.debug("nostr-sync: relay connect failed", url);
+          this.updateHealth(url, false);
         }
       }),
     );
@@ -83,27 +70,18 @@ export class RelayPool {
       try {
         const start = Date.now();
         await this.pool.publish([h.url], event);
-        // Success — update health
-        h.connected = true;
-        h.latency = Date.now() - start;
-        h.consecutiveErrors = 0;
-        h.lastError = null;
-        h.lastChecked = Date.now();
-        h.healthScore = this.computeHealthScore(h);
+        this.updateHealth(h.url, true, Date.now() - start);
         this.emitHealth();
         return;
       } catch (e) {
         lastError = e instanceof Error ? e : new Error(String(e));
-        h.connected = false;
-        h.consecutiveErrors++;
-        h.lastError = lastError.message;
-        h.lastChecked = Date.now();
-        h.healthScore = this.computeHealthScore(h);
-        this.emitHealth();
+        console.debug("nostr-sync: relay publish failed, trying next", h.url, lastError.message);
+        this.updateHealth(h.url, false, undefined, lastError.message);
         // Continue to next relay
       }
     }
 
+    this.emitHealth();
     throw lastError ?? new Error("Publish failed on all relays");
   }
 
@@ -173,6 +151,23 @@ export class RelayPool {
     });
   }
 
+  /** Unified health update: called from connect(), publish(), and checkAllHealth(). */
+  private updateHealth(url: string, success: boolean, latency?: number, error?: string): void {
+    const h = this.health.get(url);
+    if (!h) return;
+    h.connected = success;
+    h.lastChecked = Date.now();
+    if (success) {
+      h.latency = latency ?? -1;
+      h.consecutiveErrors = 0;
+      h.lastError = null;
+    } else {
+      h.consecutiveErrors++;
+      if (error) h.lastError = error;
+    }
+    h.healthScore = this.computeHealthScore(h);
+  }
+
   /**
    * healthScore formula: lower is better.
    * (latency === -1 ? 5000 : latency) + (consecutiveErrors * 2000)
@@ -198,30 +193,19 @@ export class RelayPool {
     }
   }
 
-  /** Periodically re-measure relay latency and update health scores. */
+  /** Periodically re-measure relay latency (concurrent) and update health scores. */
   private async checkAllHealth(): Promise<void> {
-    for (const url of this.urls) {
-      const start = Date.now();
-      try {
-        await this.pool.ensureRelay(url);
-        const latency = Date.now() - start;
-        const h = this.health.get(url);
-        if (h) {
-          h.connected = true;
-          h.latency = latency;
-          h.lastChecked = Date.now();
-          h.healthScore = this.computeHealthScore(h);
+    await Promise.all(
+      Array.from(this.urls).map(async (url) => {
+        const start = Date.now();
+        try {
+          await this.pool.ensureRelay(url);
+          this.updateHealth(url, true, Date.now() - start);
+        } catch {
+          this.updateHealth(url, false);
         }
-      } catch {
-        const h = this.health.get(url);
-        if (h) {
-          h.connected = false;
-          h.consecutiveErrors++;
-          h.lastChecked = Date.now();
-          h.healthScore = this.computeHealthScore(h);
-        }
-      }
-    }
+      }),
+    );
     this.emitHealth();
   }
 }

@@ -6,20 +6,12 @@
  *   nsec ──ECDH(self)─────────▶ conversationKey ──NIP-44─────▶ file ciphertext (on relays)
  */
 
-import { nip44 } from "nostr-tools";
+import { nip44, utils } from "nostr-tools";
 import { PBKDF2_ITERATIONS } from "../constants";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function hexToBytes(hex: string): Uint8Array {
-  const len = hex.length / 2;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++)
-    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-  return bytes;
-}
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
@@ -121,7 +113,7 @@ export function deriveConversationKey(
   privkey: Uint8Array | string,
   pubkey: string,
 ): Uint8Array {
-  const sk = typeof privkey === "string" ? hexToBytes(privkey) : privkey;
+  const sk = typeof privkey === "string" ? utils.hexToBytes(privkey) : privkey;
   return nip44.getConversationKey(sk, pubkey);
 }
 

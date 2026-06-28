@@ -14,8 +14,7 @@ import {
 } from "nostr-tools";
 import type { Vault } from "obsidian";
 import { FILE_KIND, INDEX_KIND, MAX_FETCH_LIMIT } from "../constants";
-import type { KnownFile, VaultIndexPayload, FilePayload, RelayHealth } from "../types";
-import type { ConflictInfo } from "../modals/conflict-modal";
+import type { KnownFile, VaultIndexPayload, FilePayload, RelayHealth, ConflictInfo, ConflictChoice } from "../types";
 import {
   decryptPayload,
   encryptPayload,
@@ -46,7 +45,7 @@ export class SyncEngine {
   private convKey: Uint8Array;
 
   /** Relay transport */
-  relay: RelayPool;
+  private relay: RelayPool;
   private vaultId: string;
 
   /** Sub IDs */
@@ -60,8 +59,8 @@ export class SyncEngine {
   private retryBackoff = 2_000; // starts at 2s, doubles each failure
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** Stored conflict info for resolution */
-  private _lastConflict: ConflictInfo | null = null;
+  /** Stored conflict info for resolution (supports multiple concurrent conflicts). */
+  private _pendingConflicts = new Map<string, ConflictInfo>();
 
   // -----------------------------------------------------------------------
   // Callbacks for the main plugin
@@ -147,8 +146,9 @@ export class SyncEngine {
         this.onHealthChange(this.relay.getHealth());
       }
       await this.subscribeAll();
-    } catch {
+    } catch (e) {
       if (!this.started) return;
+      console.debug("nostr-sync: relay connect failed, retrying in", this.retryBackoff, "ms");
       // Silently back off and retry — relay disconnects should not spam the user.
       this.reconnectTimer = setTimeout(
         () => void this.connectWithRetry(),
@@ -386,8 +386,8 @@ export class SyncEngine {
         }
         this.files.delete(del.path);
       }
-    } catch {
-      // ignore unparseable index
+    } catch (e) {
+      console.debug("nostr-sync: unparseable vault index, skipping", e);
     }
   }
 
@@ -423,15 +423,16 @@ export class SyncEngine {
         // Real conflict: both local and remote changed relative to known state
         if (localChecksum !== known.checksum && payload.checksum !== known.checksum) {
           // CONFLICT DETECTED
-          this._lastConflict = {
+          const conflictInfo: ConflictInfo = {
             path: payload.path,
             localContent,
             remoteContent: payload.content,
             localVersion: known.version + 1, // approximate
             remoteVersion: payload.version,
           };
+          this._pendingConflicts.set(payload.path, conflictInfo);
           if (this.onConflict) {
-            this.onConflict(this._lastConflict);
+            this.onConflict(conflictInfo);
           }
           return; // Don't auto-overwrite — wait for user resolution
         }
@@ -454,8 +455,8 @@ export class SyncEngine {
         checksum: payload.checksum,
         version: payload.version,
       });
-    } catch {
-      // skip
+    } catch (e) {
+      console.debug("nostr-sync: bad remote file event, skipping", e);
     }
   }
 
@@ -466,26 +467,27 @@ export class SyncEngine {
   /**
    * Resolve a sync conflict by applying the user's chosen strategy.
    */
-  async resolveConflict(path: string, choice: "keep-local" | "keep-remote" | "keep-both"): Promise<void> {
+  async resolveConflict(path: string, choice: ConflictChoice): Promise<void> {
     await this.enqueue(async () => {
+      const conflict = this._pendingConflicts.get(path);
       if (choice === "keep-local") {
         // Re-push local version to update remote
         await this._pushFile(path);
       } else if (choice === "keep-remote") {
         // Write remote content to path, then push updated index
-        if (this._lastConflict && this._lastConflict.path === path) {
+        if (conflict) {
           const exists = await this.vault.adapter.exists(path);
           if (exists) {
-            await this.vault.adapter.write(path, this._lastConflict.remoteContent);
+            await this.vault.adapter.write(path, conflict.remoteContent);
           } else {
-            await this.vault.create(path, this._lastConflict.remoteContent);
+            await this.vault.create(path, conflict.remoteContent);
           }
           // Update known state with remote version
-          const checksum = await sha256(this._lastConflict.remoteContent);
+          const checksum = await sha256(conflict.remoteContent);
           this.files.set(path, {
             eventId: "", // will be set on next push
             checksum,
-            version: this._lastConflict.remoteVersion,
+            version: conflict.remoteVersion,
           });
         }
         await this._pushFile(path);
@@ -498,13 +500,14 @@ export class SyncEngine {
         const conflictPath = `${base}-conflict-${timestamp}${suffix}`;
 
         // Write remote content to conflict file
-        if (this._lastConflict && this._lastConflict.path === path) {
-          await this.vault.create(conflictPath, this._lastConflict.remoteContent);
+        if (conflict) {
+          await this.vault.create(conflictPath, conflict.remoteContent);
           await this._pushFile(conflictPath);
         }
         // Keep local file as-is (already on disk)
         await this._pushFile(path);
       }
+      this._pendingConflicts.delete(path);
     });
   }
 
