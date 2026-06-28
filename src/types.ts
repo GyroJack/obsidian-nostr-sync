@@ -84,3 +84,10 @@ export interface ConflictInfo {
   localVersion: number;
   remoteVersion: number;
 }
+
+/** Entry in the sync activity log. */
+export interface SyncActivityEntry {
+  path: string;
+  action: "pushed" | "pulled" | "deleted";
+  timestamp: number; // Unix ms
+}

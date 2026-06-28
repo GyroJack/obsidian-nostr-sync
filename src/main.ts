@@ -4,8 +4,7 @@
 import { Plugin, Notice } from "obsidian";
 import { nip19, getPublicKey, SimplePool } from "nostr-tools";
 import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS } from "./constants";
-import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo } from "./types";
-import { formatRelayHealth } from "./types";
+import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo, SyncActivityEntry } from "./types";
 import { ConflictModal } from "./modals/conflict-modal";
 import { unwrapNsec, wrapNsec } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
@@ -56,7 +55,7 @@ export default class NostrSyncPlugin extends Plugin {
         this.setSyncStatus(this.settings.syncStatus || "locked");
         this.statusBarItem.addClass("nostr-sync-status-bar");
         this.statusBarItem.addEventListener("click", () => {
-          this.showRelayHealthPopup();
+          void this.showRelayHealthPopup();
         });
       });
 
@@ -296,19 +295,64 @@ export default class NostrSyncPlugin extends Plugin {
     }, 150);
   }
 
-  /** Show a notice with relay health info. */
-  private showRelayHealthPopup(): void {
-    const health = this.getRelayHealth();
-    if (health.length === 0) {
-      new Notice("No relay health data yet. Start sync to connect.");
-      return;
+  /** Show a notice with live relay pings and recent sync activity. */
+  private async showRelayHealthPopup(): Promise<void> {
+    const relays = this.settings.relays.filter(isValidRelayUrl);
+
+    // Show "measuring" notice while testing
+    const measuringNotice = new Notice("Measuring relay latency...", 0);
+
+    try {
+      // Test all relays in parallel
+      const results = await Promise.all(
+        relays.map(async (url) => {
+          const result = await this.testRelay(url);
+          return { url, ...result };
+        }),
+      );
+
+      // Format relay results
+      const relayLines: string[] = [];
+      for (const r of results) {
+        if (r.ok) {
+          const icon = r.latency < 200 ? "✅" : "🟡";
+          relayLines.push(`${icon} ${r.url} — ${r.latency}ms`);
+        } else {
+          relayLines.push(`❌ ${r.url} — failed`);
+        }
+      }
+
+      // Get recent activity
+      const activity = this.getRecentActivity();
+      const activityLines: string[] = [];
+      if (activity.length === 0) {
+        activityLines.push("No recent sync activity");
+      } else {
+        activityLines.push("Recent Activity (last 20):");
+        const recent = activity.slice(0, 20);
+        for (const entry of recent) {
+          const arrow = entry.action === "pulled" ? "↓" : entry.action === "pushed" ? "↑" : "✕";
+          activityLines.push(`${arrow} ${entry.action} ${entry.path}`);
+        }
+      }
+
+      // Build full message
+      const lines = [
+        "Nostr Sync",
+        "",
+        "Relays:",
+        ...relayLines,
+        "",
+        ...activityLines,
+      ];
+
+      // Dismiss measuring notice and show results
+      measuringNotice.hide();
+      new Notice(lines.join("\n"), 10000);
+    } catch (err) {
+      measuringNotice.hide();
+      new Notice("❌ Failed to test relays", 5000);
     }
-    const lines = ["Relay Health:"];
-    for (const h of health) {
-      const f = formatRelayHealth(h);
-      lines.push(`${f.icon} ${h.url} — ${f.latencyStr}${f.errorStr}`);
-    }
-    new Notice(lines.join("\n"), 8000);
   }
 
   // ── Conflict Modal ────────────────────────────────
@@ -348,5 +392,10 @@ export default class NostrSyncPlugin extends Plugin {
       return this.engine.getSyncStats();
     }
     return { fileCount: 0, lastSync: 0 };
+  }
+
+  /** Get recent sync activity from the engine. */
+  getRecentActivity(): SyncActivityEntry[] {
+    return this.engine?.getRecentActivity() ?? [];
   }
 }

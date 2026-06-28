@@ -14,7 +14,7 @@ import {
 } from "nostr-tools";
 import type { Vault } from "obsidian";
 import { FILE_KIND, INDEX_KIND, MAX_FETCH_LIMIT } from "../constants";
-import type { KnownFile, VaultIndexPayload, FilePayload, RelayHealth, ConflictInfo, ConflictChoice } from "../types";
+import type { KnownFile, VaultIndexPayload, FilePayload, RelayHealth, ConflictInfo, ConflictChoice, SyncActivityEntry } from "../types";
 import {
   decryptPayload,
   encryptPayload,
@@ -64,6 +64,10 @@ export class SyncEngine {
 
   /** Track last sync time for stats display. */
   private _lastSync = 0;
+
+  /** Activity log for tracking recent sync operations. */
+  private _activityLog: SyncActivityEntry[] = [];
+  private readonly MAX_ACTIVITY = 50;
 
   // -----------------------------------------------------------------------
   // Callbacks for the main plugin
@@ -171,6 +175,19 @@ export class SyncEngine {
     return { fileCount: this.files.size, lastSync: this._lastSync };
   }
 
+  /** Log a sync activity entry (capped at MAX_ACTIVITY). */
+  private logActivity(path: string, action: SyncActivityEntry["action"]): void {
+    this._activityLog.push({ path, action, timestamp: Date.now() });
+    if (this._activityLog.length > this.MAX_ACTIVITY) {
+      this._activityLog = this._activityLog.slice(-this.MAX_ACTIVITY);
+    }
+  }
+
+  /** Return recent activity entries, newest first. */
+  getRecentActivity(): SyncActivityEntry[] {
+    return [...this._activityLog].reverse();
+  }
+
   // -----------------------------------------------------------------------
   // Push: local → remote
   // -----------------------------------------------------------------------
@@ -196,6 +213,7 @@ export class SyncEngine {
     try {
       await this.enqueue(async () => {
         this.files.delete(path);
+        this.logActivity(path, "deleted");
         await this._pushIndex();
       });
     } finally {
@@ -273,6 +291,8 @@ export class SyncEngine {
       checksum,
       version,
     });
+
+    this.logActivity(path, "pushed");
 
     await this._pushIndex();
   }
@@ -464,6 +484,8 @@ export class SyncEngine {
         checksum: payload.checksum,
         version: payload.version,
       });
+
+      this.logActivity(payload.path, "pulled");
     } catch (e) {
       console.debug("nostr-sync: bad remote file event, skipping", e);
     }
@@ -482,6 +504,7 @@ export class SyncEngine {
       if (choice === "keep-local") {
         // Re-push local version to update remote
         await this._pushFile(path);
+        this.logActivity(path, "pushed");
       } else if (choice === "keep-remote") {
         // Write remote content to path, then push updated index
         if (conflict) {
@@ -500,6 +523,7 @@ export class SyncEngine {
           });
         }
         await this._pushFile(path);
+        this.logActivity(path, "pulled");
       } else {
         // keep-both: duplicate local file with conflict suffix
         const ext = path.lastIndexOf(".");
@@ -512,6 +536,7 @@ export class SyncEngine {
         if (conflict) {
           await this.vault.create(conflictPath, conflict.remoteContent);
           await this._pushFile(conflictPath);
+          this.logActivity(conflictPath, "pulled");
         }
         // Keep local file as-is (already on disk)
         await this._pushFile(path);
