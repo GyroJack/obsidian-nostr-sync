@@ -208,3 +208,130 @@ export async function sha256(content: string): Promise<string> {
   const bytes = Array.from(new Uint8Array(hash));
   return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+// ---------------------------------------------------------------------------
+// Vault key — shared AES-256 key for content encryption (multi-user vaults)
+// ---------------------------------------------------------------------------
+
+const VAULT_IV_LEN = 12;
+
+/** Generate a cryptographically random 256-bit vault key. */
+export function generateVaultKey(): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(32));
+}
+
+async function importVaultKey(keyBytes: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    keyBytes as BufferSource,
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/**
+ * Encrypt plaintext with AES-256-GCM using the shared vault key.
+ * Returns IV-prefixed ciphertext, base64-encoded (same format as wrapNsec).
+ */
+export async function encryptWithVaultKey(
+  plaintext: string,
+  vaultKey: Uint8Array,
+): Promise<string> {
+  const key = await importVaultKey(vaultKey);
+  const iv  = crypto.getRandomValues(new Uint8Array(VAULT_IV_LEN));
+  const data = new TextEncoder().encode(plaintext);
+  const ct   = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data as BufferSource);
+  const arr  = new Uint8Array(ct);
+
+  const buf = new Uint8Array(VAULT_IV_LEN + arr.length);
+  buf.set(iv, 0);
+  buf.set(arr, VAULT_IV_LEN);
+
+  return bytesToBase64(buf);
+}
+
+/**
+ * Decrypt ciphertext with AES-256-GCM using the shared vault key.
+ * Throws on auth tag mismatch (wrong key or corrupted data).
+ */
+export async function decryptWithVaultKey(
+  ciphertext: string,
+  vaultKey: Uint8Array,
+): Promise<string> {
+  const blob       = base64ToBytes(ciphertext);
+  const iv         = blob.slice(0, VAULT_IV_LEN);
+  const cipherData = blob.slice(VAULT_IV_LEN);
+  const key        = await importVaultKey(vaultKey);
+
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipherData as BufferSource);
+  return new TextDecoder().decode(pt);
+}
+
+// ---------------------------------------------------------------------------
+// Vault key wrapping — local storage (NIP-44 self-encrypt)
+// ---------------------------------------------------------------------------
+
+function vaultKeyToHex(key: Uint8Array): string {
+  return Array.from(key).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToVaultKey(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Wrap vault key for local storage — NIP-44 encrypt with self-conversation key.
+ */
+export function wrapVaultKey(
+  vaultKey: Uint8Array,
+  conversationKey: Uint8Array,
+): string {
+  return nip44.encrypt(vaultKeyToHex(vaultKey), conversationKey);
+}
+
+/**
+ * Unwrap vault key from local storage — NIP-44 decrypt with self-conversation key.
+ */
+export function unwrapVaultKey(
+  encrypted: string,
+  conversationKey: Uint8Array,
+): Uint8Array {
+  const hex = nip44.decrypt(encrypted, conversationKey);
+  return hexToVaultKey(hex);
+}
+
+// ---------------------------------------------------------------------------
+// Vault key sharing — NIP-44 to recipient (kind 30802 envelopes)
+// ---------------------------------------------------------------------------
+
+/**
+ * Encrypt vault key to a recipient for kind 30802 publishing.
+ * Uses NIP-44: sender's privkey + recipient's pubkey → conversation key → encrypt.
+ */
+export function encryptVaultKeyToRecipient(
+  vaultKey: Uint8Array,
+  senderPrivkey: Uint8Array,
+  recipientPubkey: string,
+): string {
+  const convKey = nip44.getConversationKey(senderPrivkey, recipientPubkey);
+  return nip44.encrypt(vaultKeyToHex(vaultKey), convKey);
+}
+
+/**
+ * Decrypt vault key from a kind 30802 event.
+ * Uses NIP-44: my privkey + sender's pubkey → conversation key → decrypt.
+ */
+export function decryptVaultKeyFromSender(
+  ciphertext: string,
+  senderPubkey: string,
+  myPrivkey: Uint8Array,
+): Uint8Array {
+  const convKey = nip44.getConversationKey(myPrivkey, senderPubkey);
+  const hex = nip44.decrypt(ciphertext, convKey);
+  return hexToVaultKey(hex);
+}

@@ -1,6 +1,7 @@
 /** Nostr event kinds used by the sync protocol (Onyx-compatible) */
 export const FILE_KIND = 30800 as const;
 export const INDEX_KIND = 30801 as const;
+export const VAULT_KEY_KIND = 30802 as const;
 
 /** Default relay pool */
 export const DEFAULT_RELAYS = [
