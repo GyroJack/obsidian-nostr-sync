@@ -21,8 +21,8 @@ export const SYNC_DEBOUNCE_MS = 5_000;
 /** Max events to fetch in a single relay query */
 export const MAX_FETCH_LIMIT = 500;
 
-/** Interval at which relay health is re-checked (ms) */
-export const HEALTH_CHECK_INTERVAL_MS = 30_000;
+/** Interval at which relay health is re-checked (ms). 2 minutes on all platforms — 30s was excessive for mobile battery. */
+export const HEALTH_CHECK_INTERVAL_MS = 120_000;
 
 /** Max consecutive errors before a relay is considered dead */
 export const MAX_CONSECUTIVE_ERRORS = 5;
