@@ -47,6 +47,9 @@ export class SyncEngine {
   /** Map<path, KnownFile> — local knowledge of what's synced */
   private files = new Map<string, KnownFile>();
 
+  /** Tombstones — paths deleted via vault index, with deletion timestamp */
+  private _deletedAt = new Map<string, number>();
+
   /** Nostr key material (in memory only) */
   private privkey: Uint8Array;
   private pubkey: string;
@@ -247,6 +250,8 @@ export class SyncEngine {
   /** Mark a file as deleted and publish an updated vault index. */
   async handleDelete(path: string): Promise<void> {
     await this.enqueue(async () => {
+      const now = Math.floor(Date.now() / 1000);
+      this._deletedAt.set(path, now);
       await this._pushIndex([path]);
       this.files.delete(path);
       this.logActivity(path, "deleted");
@@ -271,6 +276,10 @@ export class SyncEngine {
 
       if (toDelete.length === 0) return;
 
+      const now = Math.floor(Date.now() / 1000);
+      for (const p of toDelete) {
+        this._deletedAt.set(p, now);
+      }
       await this._pushIndex(toDelete);
 
       for (const p of toDelete) {
@@ -510,6 +519,7 @@ export class SyncEngine {
       }
 
       for (const del of index.deleted) {
+        this._deletedAt.set(del.path, del.deletedAt);
         const exists = await this.vault.adapter.exists(del.path);
         if (exists) {
           await this.vault.adapter.remove(del.path);
@@ -538,6 +548,19 @@ export class SyncEngine {
       if (dTag[1] !== (await sha256(payload.path))) {
         console.debug("nostr-sync: d-tag mismatch for", payload.path, "— skipping");
         return;
+      }
+
+      // ── Tombstone guard ──────────────────────────────────────
+      // If this file was deleted via the vault index and this event
+      // predates the deletion, skip it — the tombstone wins.
+      const deletedAt = this._deletedAt.get(payload.path);
+      if (deletedAt !== undefined && event.created_at <= deletedAt) {
+        console.debug("nostr-sync: skipping tombstoned file", payload.path);
+        return;
+      }
+      // If the file was re-created after deletion, clear the tombstone.
+      if (deletedAt !== undefined && event.created_at > deletedAt) {
+        this._deletedAt.delete(payload.path);
       }
 
       const known = this.files.get(payload.path);
