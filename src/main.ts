@@ -279,7 +279,11 @@ export default class NostrSyncPlugin extends Plugin {
           await this.engine.pushFile(e.path);
           break;
         case "delete":
-          await this.engine.handleDelete(e.path);
+          if (e.isFolder) {
+            await this.engine.deleteFolder(e.path);
+          } else {
+            await this.engine.handleDelete(e.path);
+          }
           break;
         case "rename":
           if (e.oldPath) {

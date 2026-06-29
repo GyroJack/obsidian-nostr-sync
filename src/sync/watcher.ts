@@ -2,6 +2,7 @@
  * VaultWatcher — wraps Obsidian's vault.on() events and debounces them.
  */
 import type { Vault, TAbstractFile, EventRef } from "obsidian";
+import { TFolder } from "obsidian";
 import { SYNC_DEBOUNCE_MS } from "../constants";
 
 export type FileChangeAction = "modify" | "create" | "delete" | "rename";
@@ -10,6 +11,7 @@ export interface FileChangeEvent {
   path: string;
   action: FileChangeAction;
   oldPath?: string;
+  isFolder?: boolean;
 }
 
 export type ChangeHandler = (e: FileChangeEvent) => void;
@@ -34,7 +36,11 @@ export class VaultWatcher {
       this.handler({ path: file.path, action: "create" });
     }));
     this.refs.push(this.vault.on("delete", (file: TAbstractFile) => {
-      this.handler({ path: file.path, action: "delete" });
+      this.handler({
+        path: file.path,
+        action: "delete",
+        isFolder: file instanceof TFolder,
+      });
     }));
     this.refs.push(this.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
       this.handler({ path: file.path, action: "rename", oldPath });

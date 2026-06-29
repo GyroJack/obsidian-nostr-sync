@@ -234,7 +234,34 @@ export class SyncEngine {
     await this.enqueue(async () => {
       this.files.delete(path);
       this.logActivity(path, "deleted");
-      await this._pushIndex();
+      await this._pushIndex([path]);
+    });
+  }
+
+  /**
+   * Delete all tracked files under a folder and publish a single vault index
+   * with all of them listed as deleted.
+   */
+  async deleteFolder(folderPath: string): Promise<void> {
+    const normalizedPath = folderPath.endsWith("/") ? folderPath.slice(0, -1) : folderPath;
+    const prefix = normalizedPath + "/";
+
+    await this.enqueue(async () => {
+      const toDelete: string[] = [];
+      for (const [path] of this.files) {
+        if (path.startsWith(prefix)) {
+          toDelete.push(path);
+        }
+      }
+
+      if (toDelete.length === 0) return;
+
+      for (const p of toDelete) {
+        this.files.delete(p);
+        this.logActivity(p, "deleted");
+      }
+
+      await this._pushIndex(toDelete);
     });
   }
 
