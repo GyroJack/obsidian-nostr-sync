@@ -3,11 +3,12 @@
  */
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS } from "./constants";
-import type { NostrSyncSettings, RelayHealth } from "./types";
 import type NostrSyncPlugin from "./main";
 import { nip19 } from "nostr-tools";
 
 export class SettingsTab extends PluginSettingTab {
+  private healthRefreshInterval: number | null = null;
+
   constructor(app: App, private plugin: NostrSyncPlugin) {
     super(app, plugin);
   }
