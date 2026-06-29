@@ -84,9 +84,6 @@ export class SyncEngine {
   /** Strictly monotonic timestamp for event created_at (Fix 2). */
   private _lastEventTime = 0;
 
-  /** Set to true when a remote index event arrives (cold-start sync). */
-  private _receivedIndex = false;
-
   // -----------------------------------------------------------------------
   // Callbacks for the main plugin
   // -----------------------------------------------------------------------
@@ -169,13 +166,30 @@ export class SyncEngine {
       if (this.onHealthChange) {
         this.onHealthChange(this.relay.getHealth());
       }
-      this._receivedIndex = false;
       await this.subscribeAll();
 
-      // Wait up to 10 seconds for the remote index to arrive
-      for (let i = 0; i < 20 && !this._receivedIndex; i++) {
-        await new Promise(r => setTimeout(r, 500));
+      // Explicitly fetch the latest vault index — don't rely on the push
+      // subscription to deliver it (unreliable on mobile).
+      const idxEvents = await this.relay.fetchOnce(
+        { kinds: [INDEX_KIND], authors: [this.pubkey], limit: 1 },
+        10_000,
+      );
+      if (idxEvents.length > 0) {
+        await this.onRemoteIndex(idxEvents[0]);
+      } else {
+        console.debug("nostr-sync: no existing index on relay (first device?)");
       }
+
+      // Explicitly fetch recent file events to catch up on any changes
+      // that happened while we were offline.
+      const fileEvents = await this.relay.fetchOnce(
+        { kinds: [FILE_KIND], authors: [this.pubkey], limit: MAX_FETCH_LIMIT },
+        5_000,
+      );
+      for (const event of fileEvents) {
+        await this.onRemoteFile(event);
+      }
+
       // Push any local files the remote doesn't have
       await this.syncAllLocalFiles();
     } catch (e) {
@@ -497,7 +511,6 @@ export class SyncEngine {
     } catch (e) {
       console.debug("nostr-sync: unparseable vault index, skipping", e);
     }
-    this._receivedIndex = true;
   }
 
   private async onRemoteFile(event: Event): Promise<void> {

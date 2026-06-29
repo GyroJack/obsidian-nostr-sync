@@ -121,6 +121,23 @@ export class RelayPool {
     this.subs.delete(id);
   }
 
+  /**
+   * One-shot fetch: subscribe, collect events for timeoutMs, then close.
+   * Used for explicit initial sync instead of relying on push subscriptions.
+   */
+  async fetchOnce(filter: Filter, timeoutMs: number = 10_000): Promise<Event[]> {
+    const events: Event[] = [];
+    const arr = Array.from(this.urls);
+    const sub = this.pool.subscribeMany(arr, filter, {
+      onevent: (event: Event) => {
+        events.push(event);
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, timeoutMs));
+    sub.close();
+    return events;
+  }
+
   /** Close all subscriptions and relay connections, stop health checks. */
   disconnect(): void {
     for (const [, sub] of Array.from(this.subs)) sub.close();
