@@ -38,6 +38,7 @@ export interface NostrSyncSettings {
   encryptedNsec: string;   // AES-GCM blob, base64
   salt: string;            // PBKDF2 salt, base64
   pubkey: string;          // hex public key
+  vaultId: string;         // deterministic vault identifier, persisted across restarts
   relays: string[];
   syncEnabled: boolean;
   syncStatus: SyncStatus;
@@ -83,6 +84,8 @@ export interface ConflictInfo {
   remoteContent: string;
   localVersion: number;
   remoteVersion: number;
+  /** Remote event ID, carried through to resolveConflict for accurate tracking. */
+  eventId?: string;
 }
 
 /** Entry in the sync activity log. */

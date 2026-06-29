@@ -13,8 +13,8 @@ export const DEFAULT_RELAYS = [
 /** PBKDF2 iterations for passphrase → key derivation (OWASP 2023 recommendation) */
 export const PBKDF2_ITERATIONS = 600_000;
 
-/** Debounce window for file-change → publish (ms) */
-export const SYNC_DEBOUNCE_MS = 3_000;
+/** Debounce window for file-change → publish (ms) — 15s idle push timer */
+export const SYNC_DEBOUNCE_MS = 15_000;
 
 /** Max events to fetch in a single relay query */
 export const MAX_FETCH_LIMIT = 500;

@@ -42,11 +42,11 @@ export class ConflictModal extends Modal {
     // Local (left)
     const localCol = container.createDiv({ cls: "nostr-sync-conflict-col" });
     localCol.style.flex = "1";
-    localCol.createEl("h3", { text: "Local (v" + this.info.localVersion + ")" });
+    localCol.createEl("h3", { text: "Local" });
     const localText = localCol.createEl("textarea", {
       text: this.info.localContent,
-      attr: { readonly: true },
     });
+    localText.setAttribute("readonly", "true");
     localText.style.width = "100%";
     localText.style.height = "300px";
     localText.style.fontSize = "12px";
@@ -58,11 +58,11 @@ export class ConflictModal extends Modal {
     // Remote (right)
     const remoteCol = container.createDiv({ cls: "nostr-sync-conflict-col" });
     remoteCol.style.flex = "1";
-    remoteCol.createEl("h3", { text: "Remote (v" + this.info.remoteVersion + ")" });
+    remoteCol.createEl("h3", { text: "Remote" });
     const remoteText = remoteCol.createEl("textarea", {
       text: this.info.remoteContent,
-      attr: { readonly: true },
     });
+    remoteText.setAttribute("readonly", "true");
     remoteText.style.width = "100%";
     remoteText.style.height = "300px";
     remoteText.style.fontSize = "12px";

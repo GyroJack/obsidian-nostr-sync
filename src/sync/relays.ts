@@ -106,14 +106,8 @@ export class RelayPool {
     const arr = Array.from(this.urls);
     const sub = this.pool.subscribeMany(arr, filter, {
       onevent: (event: Event) => {
-        // Mark all relays as recently active (we don't know which relay delivered it)
-        for (const url of this.urls) {
-          const h = this.health.get(url);
-          if (h) {
-            h.connected = true;
-            h.lastChecked = Date.now();
-          }
-        }
+        // Don't mark all relays as connected — a single event delivery
+        // doesn't prove all relays are healthy. Let periodic checks handle it.
         onEvent(event);
       },
     });
@@ -210,6 +204,7 @@ export class RelayPool {
           await this.pool.ensureRelay(url);
           this.updateHealth(url, true, Date.now() - start);
         } catch {
+          console.debug("nostr-sync: health check failed for", url);
           this.updateHealth(url, false);
         }
       }),

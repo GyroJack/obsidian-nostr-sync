@@ -12,7 +12,7 @@ import {
   type Event,
   type Filter,
 } from "nostr-tools";
-import type { Vault } from "obsidian";
+import type { Vault, App } from "obsidian";
 import { FILE_KIND, INDEX_KIND, MAX_FETCH_LIMIT } from "../constants";
 import type { KnownFile, VaultIndexPayload, FilePayload, RelayHealth, ConflictInfo, ConflictChoice, SyncActivityEntry } from "../types";
 import {
@@ -30,6 +30,14 @@ const SKIP_EXTS = new Set([
   "zip", "gz", "tar", "7z",
   "excalidraw", // Excalidraw JSON is syncable, but the lib file isn't
 ]);
+
+/**
+ * Normalize file content so checksums are consistent across OS line-endings.
+ * CRLF → LF, lone CR → LF, trailing newlines normalized to single LF.
+ */
+function normalizeContent(content: string): string {
+  return content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n+$/, "\n");
+}
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -97,12 +105,16 @@ export class SyncEngine {
 
   /**
    * @param vault Obsidian vault instance.
+   * @param app Obsidian App instance (for active-editor conflict gating).
    * @param privkey Nostr secret key bytes or hex string.
+   * @param vaultId Deterministic vault identifier (persisted in settings).
    * @param relays WebSocket relay URLs.
    */
   constructor(
     private vault: Vault,
+    private app: App,
     privkey: Uint8Array | string,
+    vaultId: string,
     relays?: string[],
   ) {
     const sk: Uint8Array =
@@ -113,7 +125,7 @@ export class SyncEngine {
     this.privkey = sk;
     this.pubkey  = getPublicKey(sk);
     this.convKey = deriveConversationKey(sk, this.pubkey);
-    this.vaultId = Math.random().toString(36).slice(2, 12);
+    this.vaultId = vaultId;
 
     this.relay = new RelayPool(
       relays ?? ["wss://relay.damus.io", "wss://nos.lol"],
@@ -230,10 +242,7 @@ export class SyncEngine {
   async handleRename(oldPath: string, newPath: string): Promise<void> {
     await this.enqueue(async () => {
       this.files.delete(oldPath);
-      const exists = await this.vault.adapter.exists(newPath);
-      if (exists) {
-        await this._pushFile(newPath);
-      }
+      await this._pushFile(newPath);  // _pushFile handles the exists() check internally
       await this._pushIndex([oldPath]);
     });
   }
@@ -249,8 +258,9 @@ export class SyncEngine {
     const exists = await this.vault.adapter.exists(path);
     if (!exists) return;
 
-    const content  = await this.vault.adapter.read(path);
-    const checksum = await sha256(content);
+    const rawContent = await this.vault.adapter.read(path);
+    const normalized = normalizeContent(rawContent);
+    const checksum = await sha256(normalized);
     const known    = this.files.get(path);
     if (known && known.checksum === checksum) return;
 
@@ -260,7 +270,7 @@ export class SyncEngine {
 
     const payload: FilePayload = {
       path,
-      content,
+      content: normalized,
       checksum,
       version,
       modified: now,
@@ -375,7 +385,7 @@ export class SyncEngine {
   // -----------------------------------------------------------------------
 
   private async enqueue(fn: () => Promise<void>): Promise<void> {
-    this.opQueue = this.opQueue.then(fn, fn);
+    this.opQueue = this.opQueue.then(fn, undefined);
     await this.opQueue;
   }
 
@@ -470,20 +480,27 @@ export class SyncEngine {
       // Require a d-tag (SHA-256 of the path) per protocol, but resolve the
       // actual path from the encrypted payload so file names never leak.
       const dTag = event.tags.find((t: string[]) => t[0] === "d");
-      if (!dTag?.[1]) return;
+      if (!dTag?.[1]) {
+        console.debug("nostr-sync: event missing d-tag, skipping", event.id);
+        return;
+      }
 
       const decrypted = decryptPayload(this.convKey, event.content);
       const payload: FilePayload = JSON.parse(decrypted);
 
       // Integrity check: d-tag must match the hash of the decrypted path.
-      if (dTag[1] !== (await sha256(payload.path))) return;
+      if (dTag[1] !== (await sha256(payload.path))) {
+        console.debug("nostr-sync: d-tag mismatch for", payload.path, "— skipping");
+        return;
+      }
 
       const known = this.files.get(payload.path);
       if (known && known.checksum === payload.checksum) return;
 
-      const computed = await sha256(payload.content);
+      const remoteContent = normalizeContent(payload.content);
+      const computed = await sha256(remoteContent);
       if (computed !== payload.checksum) {
-        // Drop malformed/ tampered events silently.
+        console.warn("nostr-sync: checksum mismatch for", payload.path, "— dropping event");
         return;
       }
 
@@ -491,8 +508,9 @@ export class SyncEngine {
       const localExists = await this.vault.adapter.exists(payload.path);
       if (localExists && known && payload.version > known.version) {
         // Remote has a newer version, but we may have local changes too
-        const localContent = await this.vault.adapter.read(payload.path);
-        const localChecksum = await sha256(localContent);
+        const rawLocal = await this.vault.adapter.read(payload.path);
+        const localNormalized = normalizeContent(rawLocal);
+        const localChecksum = await sha256(localNormalized);
 
         // Real conflict: both local and remote changed relative to known state
         if (localChecksum !== known.checksum && payload.checksum !== known.checksum) {
@@ -508,19 +526,28 @@ export class SyncEngine {
             return;
           }
 
-          // CONFLICT DETECTED
-          const conflictInfo: ConflictInfo = {
-            path: payload.path,
-            localContent,
-            remoteContent: payload.content,
-            localVersion: known.version + 1, // approximate
-            remoteVersion: payload.version,
-          };
-          this._pendingConflicts.set(payload.path, conflictInfo);
-          if (this.onConflict) {
-            this.onConflict(conflictInfo);
+          // Active-editor gate: only show conflict modal if the user is
+          // currently looking at this exact file. Otherwise silently apply
+          // the remote content — they work single-device anyway.
+          const activePath = this.app.workspace.getActiveFile()?.path;
+          if (activePath !== payload.path) {
+            // Fall through to the normal write path below (don't return)
+          } else {
+            // CONFLICT DETECTED
+            const conflictInfo: ConflictInfo = {
+              path: payload.path,
+              localContent: rawLocal,
+              remoteContent: payload.content,
+              localVersion: known.version,
+              remoteVersion: payload.version,
+              eventId: event.id!,
+            };
+            this._pendingConflicts.set(payload.path, conflictInfo);
+            if (this.onConflict) {
+              this.onConflict(conflictInfo);
+            }
+            return; // Don't auto-overwrite — wait for user resolution
           }
-          return; // Don't auto-overwrite — wait for user resolution
         }
       }
 
@@ -531,9 +558,9 @@ export class SyncEngine {
       }
 
       if (localExists) {
-        await this.vault.adapter.write(payload.path, payload.content);
+        await this.vault.adapter.write(payload.path, remoteContent);
       } else {
-        await this.vault.create(payload.path, payload.content);
+        await this.vault.create(payload.path, remoteContent);
       }
 
       this.files.set(payload.path, {
@@ -574,7 +601,7 @@ export class SyncEngine {
           // Update known state with remote version
           const checksum = await sha256(conflict.remoteContent);
           this.files.set(path, {
-            eventId: "", // will be set on next push
+            eventId: conflict.eventId ?? "",
             checksum,
             version: conflict.remoteVersion,
           });

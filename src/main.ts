@@ -8,6 +8,8 @@ import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo, SyncActi
 import { ConflictModal } from "./modals/conflict-modal";
 import { unwrapNsec, wrapNsec } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
+import { VaultWatcher } from "./sync/watcher";
+import type { FileChangeEvent } from "./sync/watcher";
 import { SettingsTab } from "./settings";
 import { PassphraseModal } from "./modals";
 
@@ -15,6 +17,7 @@ const DEFAULTS: NostrSyncSettings = {
   encryptedNsec: "",
   salt: "",
   pubkey: "",
+  vaultId: "",
   relays: [...DEFAULT_RELAYS],
   syncEnabled: false,
   syncStatus: "locked",
@@ -25,6 +28,7 @@ const DEFAULTS: NostrSyncSettings = {
 export default class NostrSyncPlugin extends Plugin {
   declare settings: NostrSyncSettings;
   private engine!: SyncEngine;
+  private watcher!: VaultWatcher;
   private statusBarItem: HTMLElement | null = null;
   private statusDebounce: ReturnType<typeof setTimeout> | null = null;
 
@@ -90,12 +94,13 @@ export default class NostrSyncPlugin extends Plugin {
   }
 
   override async onunload(): Promise<void> {
+    this.watcher?.stop();
     // Push final state before disconnecting
     if (this.engine) {
       try {
         await this.engine.rebuildIndex();
-      } catch {
-        // Best effort on shutdown
+      } catch (e) {
+        console.warn("nostr-sync: final index push failed during shutdown", e);
       }
       this.engine.stop();
     }
@@ -211,9 +216,17 @@ export default class NostrSyncPlugin extends Plugin {
   // ── Sync ──────────────────────────────────────────
 
   private async startSync(nsecBytes: Uint8Array): Promise<void> {
+    // Generate and persist a deterministic vault ID on first run
+    if (!this.settings.vaultId) {
+      this.settings.vaultId = getPublicKey(nsecBytes).slice(0, 12);
+      await this.saveSettings();
+    }
+
     this.engine = new SyncEngine(
       this.app.vault,
+      this.app,
       nsecBytes,
+      this.settings.vaultId,
       this.settings.relays.filter(isValidRelayUrl),
     );
 
@@ -225,6 +238,12 @@ export default class NostrSyncPlugin extends Plugin {
 
     // Wire conflict detection
     this.engine.onConflict = (info) => this.showConflictModal(info);
+
+    // Wire file-change watcher (15s idle debounce → push)
+    this.watcher = new VaultWatcher(this.app.vault, (e: FileChangeEvent) =>
+      this.handleFileChange(e),
+    );
+    this.watcher.start();
 
     await this.engine.start();
 
@@ -250,6 +269,30 @@ export default class NostrSyncPlugin extends Plugin {
   }
 
   // ── Status Bar ────────────────────────────────────
+
+  /** Bridges VaultWatcher events to SyncEngine. */
+  private async handleFileChange(e: FileChangeEvent): Promise<void> {
+    try {
+      switch (e.action) {
+        case "modify":
+        case "create":
+          await this.engine.pushFile(e.path);
+          break;
+        case "delete":
+          await this.engine.handleDelete(e.path);
+          break;
+        case "rename":
+          if (e.oldPath) {
+            await this.engine.handleRename(e.oldPath, e.path);
+          } else {
+            await this.engine.pushFile(e.path);
+          }
+          break;
+      }
+    } catch (e) {
+      console.warn("nostr-sync: file change handler failed", e);
+    }
+  }
 
   private setSyncStatus(status: SyncStatus): void {
     // Debounce: avoid rapid DOM updates during sync cycles.
