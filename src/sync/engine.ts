@@ -215,6 +215,37 @@ export class SyncEngine {
     return this.relay.getHealth();
   }
 
+  /**
+   * Pull remote changes from relays — fetch the latest vault index
+   * and all file events, applying tombstones and writing new files.
+   * Safe to call repeatedly; onRemoteFile skips unchanged content.
+   */
+  async pullRemoteChanges(): Promise<void> {
+    // Fetch the latest vault index
+    const idxEvents = await this.relay.querySync({
+      kinds: [INDEX_KIND],
+      authors: this.getAllAuthors(),
+      limit: 1,
+    });
+    if (idxEvents.length > 0) {
+      await this.onRemoteIndex(idxEvents[0]);
+    } else {
+      console.debug("nostr-sync: no existing index on relay");
+    }
+
+    // Fetch ALL file events for this vault
+    const fileEvents = await this.relay.querySync({
+      kinds: [FILE_KIND],
+      authors: this.getAllAuthors(),
+    });
+    fileEvents.sort((a, b) => a.created_at - b.created_at);
+    for (const event of fileEvents) {
+      await this.onRemoteFile(event);
+    }
+
+    this._lastSync = Date.now();
+  }
+
   /** Expose sync stats for the settings tab. */
   getSyncStats(): { fileCount: number; lastSync: number } {
     return { fileCount: this.files.size, lastSync: this._lastSync };

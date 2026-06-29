@@ -349,6 +349,7 @@ export default class NostrSyncPlugin extends Plugin {
     if (!this.engine) return;
     this.setSyncStatus("syncing");
     try {
+      await this.engine.pullRemoteChanges();
       await this.engine.pushAllLocalFiles();
       this.setSyncStatus("idle");
     } catch (e) {
