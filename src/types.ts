@@ -47,7 +47,7 @@ export interface NostrSyncSettings {
   syncedFileCount: number;
 }
 
-export type SyncStatus = "locked" | "unlocked" | "idle" | "syncing" | "error" | "offline" | "conflict";
+export type SyncStatus = "locked" | "unlocked" | "idle" | "syncing" | "error" | "offline" | "conflict" | "connecting";
 
 /** In-memory representation of a known synced file */
 export interface KnownFile {

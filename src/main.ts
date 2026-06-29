@@ -33,6 +33,7 @@ export default class NostrSyncPlugin extends Plugin {
   private watcher!: VaultWatcher;
   private statusBarItem: HTMLElement | null = null;
   private statusDebounce: ReturnType<typeof setTimeout> | null = null;
+  private latestRelayHealth: RelayHealth[] = [];
 
   override async onload(): Promise<void> {
     try {
@@ -282,8 +283,23 @@ export default class NostrSyncPlugin extends Plugin {
 
     // Wire relay health to status bar
     this.engine.onHealthChange = (health) => {
+      const prevConnected = this.latestRelayHealth.some((h) => h.connected);
+      this.latestRelayHealth = health;
+
+      const relay = health.length > 0 ? health[0] : null;
+      const connected = relay?.connected ?? false;
       const allDown = health.length > 0 && health.every((h) => h.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS);
-      this.setSyncStatus(allDown ? "offline" : "idle");
+
+      if (connected) {
+        if (!prevConnected && relay) {
+          new Notice(`Nostr Sync: connected to relay (${relay.latency}ms)`);
+        }
+        this.setSyncStatus("idle", relay!.latency);
+      } else if (allDown) {
+        this.setSyncStatus("offline");
+      } else {
+        this.setSyncStatus("connecting");
+      }
     };
 
     // Wire conflict detection
@@ -348,7 +364,7 @@ export default class NostrSyncPlugin extends Plugin {
     }
   }
 
-  private setSyncStatus(status: SyncStatus): void {
+  private setSyncStatus(status: SyncStatus, latency?: number): void {
     // Debounce: avoid rapid DOM updates during sync cycles.
     if (this.statusDebounce) clearTimeout(this.statusDebounce);
     this.statusDebounce = setTimeout(() => {
@@ -362,7 +378,14 @@ export default class NostrSyncPlugin extends Plugin {
         this.statusBarItem.setText("🔓 Nostr Sync: ready");
         break;
       case "idle":
-        this.statusBarItem.setText("✅ Nostr Sync");
+        if (latency !== undefined && latency >= 0) {
+          this.statusBarItem.setText(`✅ Nostr Sync (${latency}ms)`);
+        } else {
+          this.statusBarItem.setText("✅ Nostr Sync");
+        }
+        break;
+      case "connecting":
+        this.statusBarItem.setText("🔄 Nostr Sync: connecting...");
         break;
       case "syncing":
         this.statusBarItem.setText("🔄 Nostr Sync: syncing...");
