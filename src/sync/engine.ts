@@ -185,8 +185,7 @@ export class SyncEngine {
         await this.onRemoteFile(event);
       }
 
-      // Push any local files the remote doesn't have
-      await this.pushAllLocalFiles();
+
     } catch (e) {
       if (!this.started) return;
       console.debug("nostr-sync: relay connect failed, retrying in", this.retryBackoff, "ms");
@@ -387,28 +386,15 @@ export class SyncEngine {
     const signed = finalizeEvent(unsigned, this.privkey);
     console.debug('nostr-sync encrypted publish | path: [vault index] | content chars:', encrypted.length, '| first 30:', encrypted.slice(0, 30));
     await this.publishWithRetry(signed);
-    this._lastSync = Date.now();
   }
 
   // -----------------------------------------------------------------------
   // Retry logic
   // -----------------------------------------------------------------------
 
-  private async publishWithRetry(event: Event, attempts = 3): Promise<void> {
-    for (let i = 0; i < attempts; i++) {
-      try {
-        await this.relay.publish(event);
-        return;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        const delay = 1_000 * (i + 1);
-        if (i === attempts - 1) {
-          console.warn("nostr-sync: publish failed after retries:", msg);
-          throw e;
-        }
-        await new Promise((r) => setTimeout(r, delay));
-      }
-    }
+  private async publishWithRetry(event: Event): Promise<void> {
+    await this.relay.publish(event);
+    this._lastSync = Date.now();
   }
 
   // -----------------------------------------------------------------------

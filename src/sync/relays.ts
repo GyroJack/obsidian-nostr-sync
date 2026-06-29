@@ -121,7 +121,28 @@ export class RelayPool {
         events.push(event);
       },
     });
-    await new Promise((resolve) => setTimeout(resolve, timeoutMs));
+    await new Promise<void>((resolve) => {
+      const safety = setTimeout(() => resolve(), timeoutMs);
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      const check = setInterval(() => {
+        if (events.length > 0) {
+          if (!idleTimer) {
+            idleTimer = setTimeout(() => {
+              clearTimeout(safety);
+              clearInterval(check);
+              resolve();
+            }, 500);
+          }
+        }
+      }, 100);
+      setTimeout(() => {
+        if (!idleTimer) {
+          clearTimeout(safety);
+          clearInterval(check);
+          resolve();
+        }
+      }, 2000);
+    });
     sub.close();
     return events;
   }

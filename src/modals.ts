@@ -10,7 +10,7 @@ export interface PassphraseResult {
 }
 
 export class PassphraseModal extends Modal {
-  private resolve!: (result: PassphraseResult | null) => void;
+  private resolve: ((result: PassphraseResult | null) => void) | null = null;
 
   /**
    * Show the modal and return the entered passphrase + remember flag, or null if dismissed.
@@ -50,7 +50,7 @@ export class PassphraseModal extends Modal {
         text.onChange((val) => (inputValue = val));
         text.inputEl.addEventListener("keydown", (e) => {
           if (e.key === "Enter" && inputValue.length > 0) {
-            this.resolve({ passphrase: inputValue, remember: rememberValue });
+            this.resolve!({ passphrase: inputValue, remember: rememberValue });
             this.close();
           }
         });
@@ -71,20 +71,24 @@ export class PassphraseModal extends Modal {
           .setCta()
           .onClick(() => {
             if (inputValue.length > 0) {
-              this.resolve({ passphrase: inputValue, remember: rememberValue });
+              this.resolve!({ passphrase: inputValue, remember: rememberValue });
               this.close();
             }
           });
       })
       .addButton((btn) => {
         btn.setButtonText("Cancel").onClick(() => {
-          this.resolve(null);
+          this.resolve!(null);
           this.close();
         });
       });
   }
 
   override onClose(): void {
+    if (this.resolve) {
+      this.resolve(null);
+      this.resolve = null!;
+    }
     this.contentEl.empty();
   }
 }

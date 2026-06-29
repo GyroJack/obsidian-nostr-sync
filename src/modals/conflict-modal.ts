@@ -6,7 +6,7 @@ import { App, Modal } from "obsidian";
 import type { ConflictInfo, ConflictChoice } from "../types";
 
 export class ConflictModal extends Modal {
-  private resolve!: (choice: ConflictChoice) => void;
+  private resolve: ((choice: ConflictChoice) => void) | null = null;
 
   static show(app: App, info: ConflictInfo): Promise<ConflictChoice> {
     return new Promise((resolve) => {
@@ -76,16 +76,20 @@ export class ConflictModal extends Modal {
     btnRow.style.justifyContent = "flex-end";
 
     const keepLocalBtn = btnRow.createEl("button", { text: "Keep Local", cls: "mod-cta" });
-    keepLocalBtn.addEventListener("click", () => { this.resolve("keep-local"); this.close(); });
+    keepLocalBtn.addEventListener("click", () => { this.resolve!("keep-local"); this.close(); });
 
     const keepRemoteBtn = btnRow.createEl("button", { text: "Keep Remote" });
-    keepRemoteBtn.addEventListener("click", () => { this.resolve("keep-remote"); this.close(); });
+    keepRemoteBtn.addEventListener("click", () => { this.resolve!("keep-remote"); this.close(); });
 
     const keepBothBtn = btnRow.createEl("button", { text: "Keep Both" });
-    keepBothBtn.addEventListener("click", () => { this.resolve("keep-both"); this.close(); });
+    keepBothBtn.addEventListener("click", () => { this.resolve!("keep-both"); this.close(); });
   }
 
   override onClose(): void {
+    if (this.resolve) {
+      this.resolve("keep-local");
+      this.resolve = null!;
+    }
     this.contentEl.empty();
   }
 }

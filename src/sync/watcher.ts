@@ -33,7 +33,7 @@ export class VaultWatcher {
       this.debounce(file.path, "modify");
     }));
     this.refs.push(this.vault.on("create", (file: TAbstractFile) => {
-      this.handler({ path: file.path, action: "create" });
+      this.debounce(file.path, "modify");
     }));
     this.refs.push(this.vault.on("delete", (file: TAbstractFile) => {
       this.handler({
