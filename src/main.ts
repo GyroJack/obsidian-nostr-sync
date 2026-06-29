@@ -68,6 +68,14 @@ export default class NostrSyncPlugin extends Plugin {
         void this.syncNow();
       });
 
+      // Pull remote changes whenever the window regains focus
+      // (catches iOS backgrounding where WebSocket subscriptions die)
+      this.registerDomEvent(window, "focus", () => {
+        if (this.engine && this.settings.syncEnabled) {
+          void this.engine.pullRemoteChanges();
+        }
+      });
+
       if (this.settings.syncEnabled && this.settings.encryptedNsec) {
         this.app.workspace.onLayoutReady(() => {
           void this.unlockAndStart();
