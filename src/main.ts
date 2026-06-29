@@ -6,7 +6,7 @@ import { nip19, getPublicKey, utils, SimplePool } from "nostr-tools";
 import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS, SYNC_DEBOUNCE_MS } from "./constants";
 import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo, SyncActivityEntry } from "./types";
 import { ConflictModal } from "./modals/conflict-modal";
-import { unwrapNsec, wrapNsec, unwrapNsecDevice, wrapNsecDevice } from "./crypto/encryption";
+import { unwrapNsec, wrapNsec, unwrapNsecDevice, wrapNsecDevice, generateVaultKey, wrapVaultKey, unwrapVaultKey, deriveConversationKey } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
 import { VaultWatcher } from "./sync/watcher";
 import type { FileChangeEvent } from "./sync/watcher";
@@ -20,6 +20,9 @@ const DEFAULTS: NostrSyncSettings = {
   pubkey: "",
   vaultId: "",
   deviceEncryptedNsec: "",
+  encryptedVaultKey: "",
+  collaborators: [],
+  isVaultOwner: false,
   relays: [...DEFAULT_RELAYS],
   syncEnabled: false,
   debounceMs: SYNC_DEBOUNCE_MS,
@@ -36,10 +39,24 @@ export default class NostrSyncPlugin extends Plugin {
   private statusDebounce: ReturnType<typeof setTimeout> | null = null;
   private wasConnected = false;
   private nsecBytes: Uint8Array | null = null;
+  private vaultKeyBytes: Uint8Array | null = null;
 
   override async onload(): Promise<void> {
     try {
       await this.loadSettings();
+
+      // ── Vault ID migration (v1.0.x → v1.1.0) ──────
+      if (this.settings.vaultId && this.settings.vaultId.length === 12) {
+        const legacyId = this.settings.vaultId;
+        this.settings.vaultId = crypto.randomUUID();
+        this.settings.isVaultOwner = true;
+        console.log(`nostr-sync: migrated vaultId ${legacyId} → ${this.settings.vaultId}`);
+        await this.saveSettings();
+      } else if (!this.settings.vaultId) {
+        this.settings.vaultId = crypto.randomUUID();
+        this.settings.isVaultOwner = true;
+        await this.saveSettings();
+      }
 
       this.addSettingTab(new SettingsTab(this.app, this));
 
@@ -59,7 +76,6 @@ export default class NostrSyncPlugin extends Plugin {
       });
 
       if (this.settings.syncEnabled && this.settings.encryptedNsec) {
-        // Defer to after layout ready — otherwise onload() hangs
         this.app.workspace.onLayoutReady(() => {
           void this.unlockAndStart();
         });
@@ -87,7 +103,6 @@ export default class NostrSyncPlugin extends Plugin {
 
   override async onunload(): Promise<void> {
     this.watcher?.stop();
-    // Push final state before disconnecting
     if (this.engine) {
       try {
         await this.engine.rebuildIndex();
@@ -100,22 +115,20 @@ export default class NostrSyncPlugin extends Plugin {
 
   // ── Settings ──────────────────────────────────────
 
-  /** Load persisted settings from Obsidian's data store. */
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());
   }
 
-  /** Persist current settings to Obsidian's data store. */
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
   }
 
-  /** Remove all stored keys and stop sync. */
   clearStoredKey(): void {
     this.settings.encryptedNsec = "";
     this.settings.salt          = "";
     this.settings.pubkey        = "";
     this.settings.deviceEncryptedNsec = "";
+    this.settings.encryptedVaultKey = "";
     this.settings.syncEnabled   = false;
     this.engine?.stop();
     void this.saveSettings();
@@ -124,14 +137,10 @@ export default class NostrSyncPlugin extends Plugin {
 
   /**
    * Register a new nsec with a passphrase.
-   * Also stores a device-encrypted copy so the user isn't prompted on restart.
    */
   async storeNsec(nsec: string, passphrase: string): Promise<void> {
     if (passphrase.length < 8) {
-      new Notice(
-        "Nostr Sync: passphrase must be at least 8 characters.",
-        6000,
-      );
+      new Notice("Nostr Sync: passphrase must be at least 8 characters.", 6000);
       throw new Error("Passphrase too short");
     }
 
@@ -147,10 +156,7 @@ export default class NostrSyncPlugin extends Plugin {
         throw new Error("Invalid nsec format");
       }
     } catch {
-      new Notice(
-        "Nostr Sync: invalid nsec format. Use nsec1... or 64-char hex.",
-        8000,
-      );
+      new Notice("Nostr Sync: invalid nsec format. Use nsec1... or 64-char hex.", 8000);
       throw new Error("Invalid nsec format");
     }
 
@@ -165,18 +171,13 @@ export default class NostrSyncPlugin extends Plugin {
     this.settings.syncStatus = "idle";
     await this.saveSettings();
 
-    // Auto-save device-encrypted copy so restart doesn't prompt
     await this.saveDeviceEncryptedNsec(nsecBytes);
     new Notice("Nostr Sync: key registered and syncing");
   }
 
   // ── Unlock ────────────────────────────────────────
 
-  /**
-   * Try to unlock and start sync. Device-key first, then passphrase prompt.
-   */
   private async unlockAndStart(): Promise<void> {
-    // 1. Try device-key auto-unlock first
     if (this.settings.deviceEncryptedNsec && this.settings.pubkey && this.settings.vaultId) {
       try {
         const nsecBytes = await unwrapNsecDevice(
@@ -189,15 +190,12 @@ export default class NostrSyncPlugin extends Plugin {
         await this.saveSettings();
         return;
       } catch {
-        // Device key mismatch (settings migrated to new device? pubkey/vaultId changed?)
-        // Fall through to passphrase prompt.
         console.debug("nostr-sync: device-key auto-unlock failed, falling back to passphrase");
         this.settings.deviceEncryptedNsec = "";
         await this.saveSettings();
       }
     }
 
-    // 2. Fall back to passphrase prompt
     const result: PassphraseResult | null = await PassphraseModal.prompt(this.app);
     if (!result) {
       this.settings.syncStatus = "locked";
@@ -214,10 +212,7 @@ export default class NostrSyncPlugin extends Plugin {
         result.passphrase,
       );
     } catch {
-      new Notice(
-        "Nostr Sync: wrong passphrase. Try again or clear your key in settings.",
-        8000,
-      );
+      new Notice("Nostr Sync: wrong passphrase. Try again or clear your key in settings.", 8000);
       this.settings.syncStatus = "locked";
       await this.saveSettings();
       this.setSyncStatus("locked");
@@ -228,7 +223,6 @@ export default class NostrSyncPlugin extends Plugin {
     this.settings.syncStatus = "idle";
     await this.saveSettings();
 
-    // If user checked "Remember this device", save device-encrypted copy
     if (result.remember) {
       await this.saveDeviceEncryptedNsec(nsecBytes);
     }
@@ -236,7 +230,6 @@ export default class NostrSyncPlugin extends Plugin {
     new Notice("Nostr Sync: unlocked and syncing");
   }
 
-  /** Encrypt nsec with device-derived key and persist to settings. */
   private async saveDeviceEncryptedNsec(nsecBytes: Uint8Array): Promise<void> {
     if (!this.settings.pubkey || !this.settings.vaultId) return;
     try {
@@ -251,7 +244,6 @@ export default class NostrSyncPlugin extends Plugin {
     }
   }
 
-  /** Save device-encrypted key (called from settings "Remember this device" toggle). */
   async rememberDevice(): Promise<void> {
     if (this.nsecBytes) {
       await this.saveDeviceEncryptedNsec(this.nsecBytes);
@@ -259,14 +251,12 @@ export default class NostrSyncPlugin extends Plugin {
     }
   }
 
-  /** Clear device-encrypted key only (called from settings "Remember this device" toggle). */
   forgetDevice(): void {
     this.settings.deviceEncryptedNsec = "";
     void this.saveSettings();
     new Notice("Nostr Sync: device key cleared — passphrase required on next restart");
   }
 
-  /** Enable or disable sync at runtime. */
   toggleSync(enable: boolean): void {
     this.settings.syncEnabled = enable;
     if (enable) {
@@ -281,17 +271,49 @@ export default class NostrSyncPlugin extends Plugin {
     void this.saveSettings();
   }
 
+  /** Get the vault key from memory (decrypted on startup). */
+  getVaultKey(): Uint8Array | null {
+    return this.vaultKeyBytes;
+  }
+
+  /** Create a new vault key — owner only. */
+  private async createVaultKey(): Promise<Uint8Array> {
+    const vaultKey = generateVaultKey();
+    if (!this.nsecBytes) throw new Error("Cannot create vault key without nsec");
+    const pubkey = this.settings.pubkey;
+    const convKey = deriveConversationKey(this.nsecBytes, pubkey);
+    this.settings.encryptedVaultKey = wrapVaultKey(vaultKey, convKey);
+    this.vaultKeyBytes = vaultKey;
+    await this.saveSettings();
+    return vaultKey;
+  }
+
+  /** Load the vault key from local storage (NIP-44 self-decrypt). */
+  private loadVaultKey(): Uint8Array | null {
+    if (!this.settings.encryptedVaultKey || !this.nsecBytes) return null;
+    try {
+      const pubkey = this.settings.pubkey;
+      const convKey = deriveConversationKey(this.nsecBytes, pubkey);
+      return unwrapVaultKey(this.settings.encryptedVaultKey, convKey);
+    } catch {
+      console.warn("nostr-sync: failed to decrypt vault key");
+      return null;
+    }
+  }
+
   // ── Sync ──────────────────────────────────────────
 
   private async startSync(nsecBytes: Uint8Array): Promise<void> {
-    // Keep a copy in memory for device-key re-encryption
     this.nsecBytes = nsecBytes;
 
-    // Generate and persist a deterministic vault ID on first run
-    if (!this.settings.vaultId) {
-      this.settings.vaultId = getPublicKey(nsecBytes).slice(0, 12);
-      await this.saveSettings();
+    let vaultKey = this.loadVaultKey();
+    if (!vaultKey && this.settings.isVaultOwner) {
+      vaultKey = await this.createVaultKey();
     }
+    if (!vaultKey && !this.settings.isVaultOwner) {
+      console.warn("nostr-sync: no vault key yet — waiting for kind 30802 envelope");
+    }
+    this.vaultKeyBytes = vaultKey;
 
     this.engine = new SyncEngine(
       this.app.vault,
@@ -299,6 +321,8 @@ export default class NostrSyncPlugin extends Plugin {
       nsecBytes,
       this.settings.vaultId,
       this.settings.relays.filter(isValidRelayUrl),
+      vaultKey,
+      this.settings.collaborators,
     );
 
     // Wire relay health to status bar
@@ -330,10 +354,8 @@ export default class NostrSyncPlugin extends Plugin {
       }
     };
 
-    // Wire conflict detection
     this.engine.onConflict = (info) => this.showConflictModal(info);
 
-    // Wire file-change watcher (idle debounce → push)
     this.watcher = new VaultWatcher(this.app.vault, (e: FileChangeEvent) =>
       this.handleFileChange(e),
       this.settings.debounceMs,
@@ -341,15 +363,9 @@ export default class NostrSyncPlugin extends Plugin {
     this.watcher.start();
 
     await this.engine.start();
-
-    // Do an initial sync on startup
     await this.syncNow();
   }
 
-  /**
-   * Full sync cycle: push all local changes to relays.
-   * Pull happens automatically via active subscriptions.
-   */
   async syncNow(): Promise<void> {
     if (!this.engine) return;
     this.setSyncStatus("syncing");
@@ -364,7 +380,6 @@ export default class NostrSyncPlugin extends Plugin {
 
   // ── Status Bar ────────────────────────────────────
 
-  /** Bridges VaultWatcher events to SyncEngine. */
   private async handleFileChange(e: FileChangeEvent): Promise<void> {
     try {
       switch (e.action) {
@@ -393,7 +408,6 @@ export default class NostrSyncPlugin extends Plugin {
   }
 
   private setSyncStatus(status: SyncStatus, latency?: number, connectedCount?: number, totalCount?: number): void {
-    // Debounce: avoid rapid DOM updates during sync cycles.
     if (this.statusDebounce) clearTimeout(this.statusDebounce);
     this.statusDebounce = setTimeout(() => {
       this.statusDebounce = null;
@@ -453,7 +467,6 @@ export default class NostrSyncPlugin extends Plugin {
     return this.engine?.getRelayHealth() ?? [];
   }
 
-  /** Test a single relay connection and measure latency. */
   async testRelay(url: string): Promise<{ ok: boolean; latency: number }> {
     const pool = new SimplePool();
     const start = Date.now();
@@ -468,7 +481,6 @@ export default class NostrSyncPlugin extends Plugin {
     }
   }
 
-  /** Get sync stats from the engine. */
   getSyncStats(): { fileCount: number; lastSync: number } {
     if (this.engine) {
       return this.engine.getSyncStats();
@@ -476,7 +488,6 @@ export default class NostrSyncPlugin extends Plugin {
     return { fileCount: 0, lastSync: 0 };
   }
 
-  /** Get recent sync activity from the engine. */
   getRecentActivity(): SyncActivityEntry[] {
     return this.engine?.getRecentActivity() ?? [];
   }

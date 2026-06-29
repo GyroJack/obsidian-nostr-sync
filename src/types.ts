@@ -38,8 +38,11 @@ export interface NostrSyncSettings {
   encryptedNsec: string;   // AES-GCM blob, base64
   salt: string;            // PBKDF2 salt, base64
   pubkey: string;          // hex public key
-  vaultId: string;         // deterministic vault identifier, persisted across restarts
+  vaultId: string;         // UUID shared across all collaborators
   deviceEncryptedNsec: string;  // nsec encrypted with device-derived key (no passphrase needed)
+  encryptedVaultKey: string;    // vault key NIP-44 self-encrypted for local storage
+  collaborators: string[];      // hex pubkeys of other vault members
+  isVaultOwner: boolean;        // did this user create the vault?
   relays: string[];
   syncEnabled: boolean;
   debounceMs: number;        // milliseconds, default 5000

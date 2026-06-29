@@ -18,6 +18,8 @@ import type { KnownFile, VaultIndexPayload, FilePayload, RelayHealth, ConflictIn
 import {
   decryptPayload,
   encryptPayload,
+  encryptWithVaultKey,
+  decryptWithVaultKey,
   deriveConversationKey,
   sha256,
 } from "../crypto/encryption";
@@ -51,6 +53,12 @@ export class SyncEngine {
   private privkey: Uint8Array;
   private pubkey: string;
   private convKey: Uint8Array;
+
+  /** Shared vault key for content encryption (multi-user vaults). */
+  private vaultKey: Uint8Array | null;
+
+  /** Additional pubkeys to subscribe to (collaborators). */
+  private collaboratorPubkeys: string[];
 
   /** Relay transport */
   private relay: RelayPool;
@@ -103,9 +111,11 @@ export class SyncEngine {
   /**
    * @param vault Obsidian vault instance.
    * @param app Obsidian App instance (for active-editor conflict gating).
-   * @param privkey Nostr secret key bytes or hex string.
-   * @param vaultId Deterministic vault identifier (persisted in settings).
+   * @param privkey Nostr secret key bytes.
+   * @param vaultId UUID shared across all collaborators.
    * @param relays WebSocket relay URLs.
+   * @param vaultKey Shared AES-256 key for content encryption (null for legacy).
+   * @param collaboratorPubkeys Additional npub hex keys to subscribe to.
    */
   constructor(
     private vault: Vault,
@@ -113,11 +123,15 @@ export class SyncEngine {
     privkey: Uint8Array,
     vaultId: string,
     relays?: string[],
+    vaultKey?: Uint8Array | null,
+    collaboratorPubkeys?: string[],
   ) {
     this.privkey = privkey;
     this.pubkey  = getPublicKey(privkey);
     this.convKey = deriveConversationKey(privkey, this.pubkey);
     this.vaultId = vaultId;
+    this.vaultKey = vaultKey ?? null;
+    this.collaboratorPubkeys = collaboratorPubkeys ?? [];
 
     this.relay = new RelayPool(relays ?? []);
 
@@ -170,7 +184,7 @@ export class SyncEngine {
       // Fetch the latest vault index.
       const idxEvents = await this.relay.querySync({
         kinds: [INDEX_KIND],
-        authors: [this.pubkey],
+        authors: this.getAllAuthors(),
         limit: 1,
       });
       if (idxEvents.length > 0) {
@@ -182,7 +196,7 @@ export class SyncEngine {
       // Fetch ALL file events for this vault.
       const fileEvents = await this.relay.querySync({
         kinds: [FILE_KIND],
-        authors: [this.pubkey],
+        authors: this.getAllAuthors(),
       });
       // Process newest events last so version-based dedup in onRemoteFile wins.
       fileEvents.sort((a, b) => a.created_at - b.created_at);
@@ -290,6 +304,38 @@ export class SyncEngine {
   }
 
   // -----------------------------------------------------------------------
+  // Content encryption (vault key with legacy NIP-44 fallback)
+  // -----------------------------------------------------------------------
+
+  /** Encrypt content using vault key (AES-256-GCM) when available, else NIP-44. */
+  private async encryptContent(plaintext: string): Promise<string> {
+    if (this.vaultKey) {
+      return encryptWithVaultKey(plaintext, this.vaultKey);
+    }
+    return encryptPayload(this.convKey, plaintext);
+  }
+
+  /**
+   * Decrypt content — tries vault key first (AES-256-GCM), falls back to
+   * NIP-44 self-decrypt for legacy events. Handles the v1.0.x → v1.1.0 transition.
+   */
+  private async decryptContent(ciphertext: string): Promise<string> {
+    if (this.vaultKey) {
+      try {
+        return await decryptWithVaultKey(ciphertext, this.vaultKey);
+      } catch {
+        // Vault key decryption failed — fall through to legacy NIP-44
+      }
+    }
+    return decryptPayload(this.convKey, ciphertext);
+  }
+
+  /** All pubkeys to include in subscription author filters. */
+  private getAllAuthors(): string[] {
+    return [this.pubkey, ...this.collaboratorPubkeys];
+  }
+
+  // -----------------------------------------------------------------------
   // Internal push helpers
   // -----------------------------------------------------------------------
 
@@ -320,7 +366,7 @@ export class SyncEngine {
     };
 
     const plaintext = JSON.stringify(payload);
-    const encrypted = encryptPayload(this.convKey, plaintext);
+    const encrypted = await this.encryptContent(plaintext);
 
     // Use a hash of the path as the d-tag so relays cannot read file names.
     const pathHash = await sha256(path);
@@ -380,10 +426,7 @@ export class SyncEngine {
       settings: {},
     };
 
-    const encrypted = encryptPayload(
-      this.convKey,
-      JSON.stringify(indexPayload),
-    );
+    const encrypted = await this.encryptContent(JSON.stringify(indexPayload));
 
     const unsigned = {
       kind: INDEX_KIND,
@@ -454,7 +497,7 @@ export class SyncEngine {
 
     const idxFilter: Filter = {
       kinds: [INDEX_KIND],
-      authors: [this.pubkey],
+      authors: this.getAllAuthors(),
       ...(since !== undefined ? { since } : {}),
       limit: MAX_FETCH_LIMIT,
     };
@@ -466,7 +509,7 @@ export class SyncEngine {
 
     const fileFilter: Filter = {
       kinds: [FILE_KIND],
-      authors: [this.pubkey],
+      authors: this.getAllAuthors(),
       ...(since !== undefined ? { since } : {}),
       limit: MAX_FETCH_LIMIT,
     };
@@ -479,7 +522,7 @@ export class SyncEngine {
 
   private async onRemoteIndex(event: Event): Promise<void> {
     try {
-      const decrypted = decryptPayload(this.convKey, event.content);
+      const decrypted = await this.decryptContent(event.content);
       const index: VaultIndexPayload = JSON.parse(decrypted);
 
       for (const entry of index.files) {
@@ -515,7 +558,7 @@ export class SyncEngine {
         return;
       }
 
-      const decrypted = decryptPayload(this.convKey, event.content);
+      const decrypted = await this.decryptContent(event.content);
       const payload: FilePayload = JSON.parse(decrypted);
 
       // Integrity check: d-tag must match the hash of the decrypted path.
