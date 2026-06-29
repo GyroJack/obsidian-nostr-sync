@@ -4,7 +4,11 @@ export const INDEX_KIND = 30801 as const;
 
 /** Default relay pool */
 export const DEFAULT_RELAYS = [
-  "ws://100.75.251.78:7777",
+  "wss://relay.damus.io",
+  "wss://nos.lol",
+  "wss://relay.primal.net",
+  "wss://relay.ditto.pub",
+  // ws://100.75.251.78:7777 (private strfry relay)
 ] as const;
 
 /** PBKDF2 iterations for passphrase → key derivation (OWASP 2023 recommendation) */

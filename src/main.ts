@@ -284,15 +284,22 @@ export default class NostrSyncPlugin extends Plugin {
       const prevConnected = this.wasConnected;
       this.wasConnected = currentlyConnected;
 
-      const relay = health.length > 0 ? health[0] : null;
-      const connected = relay?.connected ?? false;
+      const connectedCount = health.filter((h) => h.connected).length;
+      const totalCount = health.length;
+      const bestRelay = health
+        .filter((h) => h.connected)
+        .sort((a, b) => a.latency - b.latency)[0];
       const allDown = health.length > 0 && health.every((h) => h.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS);
 
-      if (connected) {
-        if (!prevConnected && relay) {
-          new Notice(`Nostr Sync: connected to relay (${relay.latency}ms)`);
+      if (currentlyConnected && bestRelay) {
+        if (!prevConnected) {
+          new Notice(`Nostr Sync: connected to relay (${bestRelay.latency}ms)`);
         }
-        this.setSyncStatus("idle", relay!.latency);
+        if (totalCount > 1) {
+          this.setSyncStatus("idle", bestRelay.latency, connectedCount, totalCount);
+        } else {
+          this.setSyncStatus("idle", bestRelay.latency);
+        }
       } else if (allDown) {
         this.setSyncStatus("offline");
       } else {
@@ -361,7 +368,7 @@ export default class NostrSyncPlugin extends Plugin {
     }
   }
 
-  private setSyncStatus(status: SyncStatus, latency?: number): void {
+  private setSyncStatus(status: SyncStatus, latency?: number, connectedCount?: number, totalCount?: number): void {
     // Debounce: avoid rapid DOM updates during sync cycles.
     if (this.statusDebounce) clearTimeout(this.statusDebounce);
     this.statusDebounce = setTimeout(() => {
@@ -376,7 +383,11 @@ export default class NostrSyncPlugin extends Plugin {
         break;
       case "idle":
         if (latency !== undefined && latency >= 0) {
-          this.statusBarItem.setText(`✅ Nostr Sync (${latency}ms)`);
+          if (connectedCount !== undefined && totalCount !== undefined && totalCount > 1) {
+            this.statusBarItem.setText(`✅ ${connectedCount}/${totalCount} relays (${latency}ms)`);
+          } else {
+            this.statusBarItem.setText(`✅ Nostr Sync (${latency}ms)`);
+          }
         } else {
           this.statusBarItem.setText("✅ Nostr Sync");
         }

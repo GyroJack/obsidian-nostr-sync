@@ -2,9 +2,8 @@
  * SettingsTab — plugin configuration UI in Obsidian's Settings panel.
  */
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
-import { DEFAULT_RELAYS, isValidRelayUrl } from "./constants";
+import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS } from "./constants";
 import type { NostrSyncSettings, RelayHealth } from "./types";
-import { formatRelayHealth } from "./types";
 import type NostrSyncPlugin from "./main";
 import { nip19 } from "nostr-tools";
 
@@ -16,6 +15,7 @@ export class SettingsTab extends PluginSettingTab {
   private getRelayHealth: () => RelayHealth[];
   private relayTestFn: (url: string) => Promise<{ ok: boolean; latency: number }>;
   private getSyncStats: () => { fileCount: number; lastSync: number };
+  private healthRefreshInterval: number | null = null;
 
   constructor(
     app: App,
@@ -169,31 +169,92 @@ export class SettingsTab extends PluginSettingTab {
 
     // ── Relays ──────────────────────────────────────
     containerEl.createEl("h3", { text: "Relays" });
-    containerEl.createEl("p", {
-      text: "One WebSocket URL per line. Changes take effect on next sync cycle.",
-    });
 
-    new Setting(containerEl).addTextArea((ta) => {
-      ta.setValue((this.settings.relays ?? DEFAULT_RELAYS).join("\n"));
-      ta.setPlaceholder(DEFAULT_RELAYS.join("\n"));
-      ta.inputEl.rows = 6;
-      ta.onChange(async (val) => {
-        this.settings.relays = val
-          .split("\n")
-          .map((s) => s.trim())
-          .filter(isValidRelayUrl);
-        await this.saveFn();
-      });
-      return ta;
-    });
+    const relays = this.settings.relays.length > 0
+      ? this.settings.relays
+      : [...DEFAULT_RELAYS];
 
-    containerEl.createEl("p", {
-      text: "Your private relay (ws://your-relay:7777) should be listed above. One URL per line.",
-      cls: "setting-item-description",
-    });
+    for (let i = 0; i < relays.length; i++) {
+      const relayUrl = relays[i];
+      const idx = i;
+
+      new Setting(containerEl)
+        .setName(this.getRelayHealthDot(relayUrl))
+        .addText((text) =>
+          text
+            .setPlaceholder("wss://relay.example.com")
+            .setValue(relayUrl)
+            .onChange(async (v) => {
+              if (isValidRelayUrl(v)) {
+                this.settings.relays[idx] = v;
+                await this.saveFn();
+              }
+            }),
+        )
+        .addButton((btn) =>
+          btn
+            .setButtonText("Test")
+            .onClick(async () => {
+              btn.setDisabled(true);
+              btn.setButtonText("...");
+              const result = await this.relayTestFn(relayUrl);
+              new Notice(
+                result.ok
+                  ? `✅ ${relayUrl} (${result.latency}ms)`
+                  : `❌ ${relayUrl} connection failed`,
+              );
+              btn.setDisabled(false);
+              btn.setButtonText("Test");
+            }),
+        )
+        .addButton((btn) =>
+          btn.setIcon("cross").onClick(async () => {
+            this.settings.relays.splice(idx, 1);
+            await this.saveFn();
+            containerEl.empty();
+            this.display();
+          }),
+        );
+    }
+
+    // Add new relay
+    let newRelayUrl = "";
+    new Setting(containerEl)
+      .addText((text) =>
+        text
+          .setPlaceholder("wss://relay.example.com")
+          .onChange((v) => {
+            newRelayUrl = v;
+          }),
+      )
+      .addButton((btn) =>
+        btn
+          .setButtonText("Add")
+          .setCta()
+          .onClick(async () => {
+            if (isValidRelayUrl(newRelayUrl)) {
+              this.settings.relays.push(newRelayUrl);
+              await this.saveFn();
+              containerEl.empty();
+              this.display();
+            } else {
+              new Notice("❌ Invalid relay URL");
+            }
+          }),
+      );
 
     // ── Relay Health ────────────────────────────────
     containerEl.createEl("h3", { text: "Relay Health" });
+    const healthSectionEl = containerEl.createDiv({ cls: "nostr-sync-health" });
+    this.renderRelayHealth(healthSectionEl);
+
+    this.healthRefreshInterval = window.setInterval(() => {
+      this.renderRelayHealth(healthSectionEl);
+    }, 5000);
+  }
+
+  private renderRelayHealth(containerEl: HTMLElement): void {
+    containerEl.empty();
     const health = this.getRelayHealth();
     if (health.length === 0) {
       containerEl.createEl("p", {
@@ -201,37 +262,37 @@ export class SettingsTab extends PluginSettingTab {
         cls: "setting-item-description",
       });
     } else {
-      const table = containerEl.createEl("table", { cls: "nostr-sync-health-table" });
-      const header = table.createEl("tr");
-      header.createEl("th", { text: "Status" });
-      header.createEl("th", { text: "Relay" });
-      header.createEl("th", { text: "Latency" });
-      header.createEl("th", { text: "Errors" });
-      header.createEl("th", { text: "Test" });
-
       for (const h of health) {
-        const f = formatRelayHealth(h);
-        const row = table.createEl("tr");
-        row.createEl("td", { text: f.icon });
-        row.createEl("td", { text: h.url });
-        row.createEl("td", { text: f.latencyStr });
-        row.createEl("td", { text: h.consecutiveErrors > 0 ? `${h.consecutiveErrors}` : "0" });
-        // Test button
-        const testTd = row.createEl("td");
-        const testBtn = testTd.createEl("button", { text: "Test" });
-        testBtn.addEventListener("click", async () => {
-          testBtn.setText("Testing...");
-          testBtn.setAttr("disabled", "true");
-          const result = await this.relayTestFn(h.url);
-          if (result.ok) {
-            new Notice(`✅ Connected to ${h.url} (${result.latency}ms)`);
-          } else {
-            new Notice(`❌ Failed to connect to ${h.url}`);
-          }
-          testBtn.setText("Test");
-          testBtn.removeAttribute("disabled");
+        const dot = h.connected
+          ? "🟢"
+          : h.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS
+            ? "🔴"
+            : h.consecutiveErrors > 0
+              ? "🟡"
+              : "⚪";
+        const latencyStr = h.latency === -1 ? "—" : `${h.latency}ms`;
+        containerEl.createEl("p", {
+          text: `${dot} ${h.url} — ${latencyStr} — ${h.consecutiveErrors} errors`,
+          cls: "setting-item-description",
         });
       }
+    }
+  }
+
+  private getRelayHealthDot(relayUrl: string): string {
+    const health = this.getRelayHealth();
+    const h = health.find((r) => r.url === relayUrl);
+    if (!h) return "⚪";
+    if (h.connected) return "🟢";
+    if (h.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) return "🔴";
+    if (h.consecutiveErrors > 0) return "🟡";
+    return "⚪";
+  }
+
+  override hide(): void {
+    if (this.healthRefreshInterval !== null) {
+      clearInterval(this.healthRefreshInterval);
+      this.healthRefreshInterval = null;
     }
   }
 }
