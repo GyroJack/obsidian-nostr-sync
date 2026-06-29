@@ -21,10 +21,12 @@ export class VaultWatcher {
   private refs: EventRef[] = [];
   private vault: Vault;
   private handler: ChangeHandler;
+  private debounceMs: number;
 
-  constructor(vault: Vault, handler: ChangeHandler) {
+  constructor(vault: Vault, handler: ChangeHandler, debounceMs?: number) {
     this.vault   = vault;
     this.handler = handler;
+    this.debounceMs = debounceMs ?? SYNC_DEBOUNCE_MS;
   }
 
   /** Attach Obsidian vault event listeners. */
@@ -61,7 +63,7 @@ export class VaultWatcher {
       setTimeout(() => {
         this.timers.delete(path);
         this.handler({ path, action, ...extra });
-      }, SYNC_DEBOUNCE_MS),
+      }, this.debounceMs),
     );
   }
 }

@@ -3,7 +3,7 @@
  */
 import { Plugin, Notice } from "obsidian";
 import { nip19, getPublicKey, utils, SimplePool } from "nostr-tools";
-import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS } from "./constants";
+import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS, SYNC_DEBOUNCE_MS } from "./constants";
 import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo, SyncActivityEntry } from "./types";
 import { ConflictModal } from "./modals/conflict-modal";
 import { unwrapNsec, wrapNsec, unwrapNsecDevice, wrapNsecDevice } from "./crypto/encryption";
@@ -22,6 +22,7 @@ const DEFAULTS: NostrSyncSettings = {
   deviceEncryptedNsec: "",
   relays: [...DEFAULT_RELAYS],
   syncEnabled: false,
+  debounceMs: SYNC_DEBOUNCE_MS,
   syncStatus: "locked",
   lastSyncTime: 0,
   syncedFileCount: 0,
@@ -34,6 +35,7 @@ export default class NostrSyncPlugin extends Plugin {
   private statusBarItem: HTMLElement | null = null;
   private statusDebounce: ReturnType<typeof setTimeout> | null = null;
   private wasConnected = false;
+  private nsecBytes: Uint8Array | null = null;
 
   override async onload(): Promise<void> {
     try {
@@ -261,9 +263,42 @@ export default class NostrSyncPlugin extends Plugin {
     }
   }
 
+  /** Save device-encrypted key (called from settings "Remember this device" toggle). */
+  async rememberDevice(): Promise<void> {
+    if (this.nsecBytes) {
+      await this.saveDeviceEncryptedNsec(this.nsecBytes);
+      new Notice("Nostr Sync: device key saved for auto-unlock");
+    }
+  }
+
+  /** Clear device-encrypted key only (called from settings "Remember this device" toggle). */
+  forgetDevice(): void {
+    this.settings.deviceEncryptedNsec = "";
+    void this.saveSettings();
+    new Notice("Nostr Sync: device key cleared — passphrase required on next restart");
+  }
+
+  /** Enable or disable sync at runtime. */
+  toggleSync(enable: boolean): void {
+    this.settings.syncEnabled = enable;
+    if (enable) {
+      if (this.engine) {
+        this.watcher?.start();
+        this.setSyncStatus("idle");
+      }
+    } else {
+      this.watcher?.stop();
+      this.setSyncStatus("locked");
+    }
+    void this.saveSettings();
+  }
+
   // ── Sync ──────────────────────────────────────────
 
   private async startSync(nsecBytes: Uint8Array): Promise<void> {
+    // Keep a copy in memory for device-key re-encryption
+    this.nsecBytes = nsecBytes;
+
     // Generate and persist a deterministic vault ID on first run
     if (!this.settings.vaultId) {
       this.settings.vaultId = getPublicKey(nsecBytes).slice(0, 12);
@@ -310,9 +345,10 @@ export default class NostrSyncPlugin extends Plugin {
     // Wire conflict detection
     this.engine.onConflict = (info) => this.showConflictModal(info);
 
-    // Wire file-change watcher (15s idle debounce → push)
+    // Wire file-change watcher (idle debounce → push)
     this.watcher = new VaultWatcher(this.app.vault, (e: FileChangeEvent) =>
       this.handleFileChange(e),
+      this.settings.debounceMs,
     );
     this.watcher.start();
 
@@ -326,7 +362,7 @@ export default class NostrSyncPlugin extends Plugin {
    * Full sync cycle: push all local changes to relays.
    * Pull happens automatically via active subscriptions.
    */
-  private async syncNow(): Promise<void> {
+  async syncNow(): Promise<void> {
     if (!this.engine) return;
     this.setSyncStatus("syncing");
     try {

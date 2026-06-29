@@ -42,6 +42,7 @@ export interface NostrSyncSettings {
   deviceEncryptedNsec: string;  // nsec encrypted with device-derived key (no passphrase needed)
   relays: string[];
   syncEnabled: boolean;
+  debounceMs: number;        // milliseconds, default 5000
   syncStatus: SyncStatus;
   lastSyncTime: number;    // Unix timestamp ms, 0 if never
   syncedFileCount: number;
