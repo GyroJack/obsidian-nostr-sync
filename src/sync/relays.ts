@@ -47,38 +47,22 @@ export class RelayPool {
   }
 
   /**
-   * Publish an event with failover: try relays one at a time in health order.
-   * On first success, stop and update that relay's stats.
-   * If ALL fail, throw the last error.
+   * Publish an event to all configured relays in parallel.
+   * At least one relay must accept the event or an error is thrown.
    */
   async publish(event: Event): Promise<void> {
-    const sorted = this.getSortedRelays();
-    if (sorted.length === 0) throw new Error("No relays configured");
+    const arr = Array.from(this.urls);
+    if (arr.length === 0) throw new Error("No relays configured");
 
-    let lastError: Error | null = null;
-    for (const h of sorted) {
-      try {
-        const start = Date.now();
-        await this.pool.publish([h.url], event);
-        this.updateHealth(h.url, true, Date.now() - start);
-        return;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        // "replaced: have newer event" means the relay accepted a newer version.
-        // This is not a failure — treat it as success for our purposes (Fix 3).
-        if (msg.includes("replaced")) {
-          this.updateHealth(h.url, true);
-          return;
-        }
-        lastError = e instanceof Error ? e : new Error(String(e));
-        console.debug("nostr-sync: relay publish failed, trying next", h.url, lastError.message);
-        this.updateHealth(h.url, false, undefined, lastError.message);
-        // Continue to next relay
-      }
+    const results = await Promise.allSettled(
+      arr.map((url) => this.pool.publish([url], event))
+    );
+
+    const successes = results.filter((r) => r.status === "fulfilled").length;
+    if (successes === 0) {
+      throw new Error("Failed to publish to any relay");
     }
-
-    this.emitHealth();
-    throw lastError ?? new Error("Publish failed on all relays");
+    // Success — at least one relay accepted the event
   }
 
   /**
@@ -110,41 +94,12 @@ export class RelayPool {
   }
 
   /**
-   * One-shot fetch: subscribe, collect events for timeoutMs, then close.
-   * Used for explicit initial sync instead of relying on push subscriptions.
+   * Blocking query that waits until the relay sends EOSE.
+   * Returns every event matching the filter — used for the initial sync pull.
    */
-  async fetchOnce(filter: Filter, timeoutMs: number = 10_000): Promise<Event[]> {
-    const events: Event[] = [];
+  async querySync(filter: Filter): Promise<Event[]> {
     const arr = Array.from(this.urls);
-    const sub = this.pool.subscribeMany(arr, filter, {
-      onevent: (event: Event) => {
-        events.push(event);
-      },
-    });
-    await new Promise<void>((resolve) => {
-      const safety = setTimeout(() => resolve(), timeoutMs);
-      let idleTimer: ReturnType<typeof setTimeout> | null = null;
-      const check = setInterval(() => {
-        if (events.length > 0) {
-          if (!idleTimer) {
-            idleTimer = setTimeout(() => {
-              clearTimeout(safety);
-              clearInterval(check);
-              resolve();
-            }, 500);
-          }
-        }
-      }, 100);
-      setTimeout(() => {
-        if (!idleTimer) {
-          clearTimeout(safety);
-          clearInterval(check);
-          resolve();
-        }
-      }, 2000);
-    });
-    sub.close();
-    return events;
+    return await this.pool.querySync(arr, filter);
   }
 
   /** Close all subscriptions and relay connections, stop health checks. */

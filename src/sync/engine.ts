@@ -161,31 +161,40 @@ export class SyncEngine {
       if (this.onHealthChange) {
         this.onHealthChange(this.relay.getHealth());
       }
-      await this.subscribeAll();
 
-      // Explicitly fetch the latest vault index — don't rely on the push
-      // subscription to deliver it (unreliable on mobile).
-      const idxEvents = await this.relay.fetchOnce(
-        { kinds: [INDEX_KIND], authors: [this.pubkey], limit: 1 },
-        10_000,
-      );
+      // Capture sync start time BEFORE the initial pull so the live
+      // subscription only receives NEW events after this point.
+      const syncStartTime = Math.floor(Date.now() / 1000);
+
+      // Phase 1: explicit pull — blocking until EOSE.
+      // Fetch the latest vault index.
+      const idxEvents = await this.relay.querySync({
+        kinds: [INDEX_KIND],
+        authors: [this.pubkey],
+        limit: 1,
+      });
       if (idxEvents.length > 0) {
         await this.onRemoteIndex(idxEvents[0]);
       } else {
         console.debug("nostr-sync: no existing index on relay (first device?)");
       }
 
-      // Explicitly fetch recent file events to catch up on any changes
-      // that happened while we were offline.
-      const fileEvents = await this.relay.fetchOnce(
-        { kinds: [FILE_KIND], authors: [this.pubkey], limit: MAX_FETCH_LIMIT },
-        5_000,
-      );
+      // Fetch ALL file events for this vault.
+      const fileEvents = await this.relay.querySync({
+        kinds: [FILE_KIND],
+        authors: [this.pubkey],
+      });
+      // Process newest events last so version-based dedup in onRemoteFile wins.
+      fileEvents.sort((a, b) => a.created_at - b.created_at);
       for (const event of fileEvents) {
         await this.onRemoteFile(event);
       }
 
+      // Phase 2: live subscription for events published after syncStartTime.
+      await this.subscribeAll(syncStartTime);
 
+      // Push any local files that are missing from or newer than remote.
+      await this.pushAllLocalFiles();
     } catch (e) {
       if (!this.started) return;
       console.debug("nostr-sync: relay connect failed, retrying in", this.retryBackoff, "ms");
@@ -439,13 +448,14 @@ export class SyncEngine {
     }
   }
 
-  private async subscribeAll(): Promise<void> {
+  private async subscribeAll(since?: number): Promise<void> {
     for (const id of this.subIds) this.relay.unsubscribe(id);
     this.subIds = [];
 
     const idxFilter: Filter = {
       kinds: [INDEX_KIND],
       authors: [this.pubkey],
+      ...(since !== undefined ? { since } : {}),
       limit: MAX_FETCH_LIMIT,
     };
     const sid1 = this.relay.subscribe(
@@ -457,6 +467,7 @@ export class SyncEngine {
     const fileFilter: Filter = {
       kinds: [FILE_KIND],
       authors: [this.pubkey],
+      ...(since !== undefined ? { since } : {}),
       limit: MAX_FETCH_LIMIT,
     };
     const sid2 = this.relay.subscribe(
