@@ -41,7 +41,19 @@ export default class NostrSyncPlugin extends Plugin {
     try {
       await this.loadSettings();
 
-      this.addSettingTab(new SettingsTab(this.app, this));
+      this.addSettingTab(
+        new SettingsTab(
+          this.app,
+          this,
+          this.settings,
+          () => this.saveSettings(),
+          () => this.clearStoredKey(),
+          (nsec, passphrase) => this.storeNsec(nsec, passphrase),
+          () => this.getRelayHealth(),
+          (url) => this.testRelay(url),
+          () => this.getSyncStats(),
+        ),
+      );
 
       // Status bar — click triggers manual sync
       this.app.workspace.onLayoutReady(() => {

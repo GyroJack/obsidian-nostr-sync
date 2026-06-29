@@ -3,6 +3,7 @@
  */
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS } from "./constants";
+import type { NostrSyncSettings, RelayHealth } from "./types";
 import type NostrSyncPlugin from "./main";
 import { nip19 } from "nostr-tools";
 
@@ -257,7 +258,14 @@ export class SettingsTab extends PluginSettingTab {
         }),
       );
 
-    // Relay Health table — rendered once when settings tab opens
+    // ── Relay Health (table) ───────────────────────
+    containerEl.createEl("h3", { text: "Relay Health" });
+    const healthSectionEl = containerEl.createDiv({ cls: "nostr-sync-health" });
+    this.renderRelayHealth(healthSectionEl);
+
+    this.healthRefreshInterval = window.setInterval(() => {
+      this.renderRelayHealth(healthSectionEl);
+    }, 5000);
 
     // ═══════════════════════════════════════════════════
     // 👥 Vault Collaborators
@@ -301,6 +309,53 @@ export class SettingsTab extends PluginSettingTab {
       .setDesc("github.com/GyroJack/obsidian-nostr-sync");
   }
 
+  // ── Relay Health Table ──────────────────────────────
+
+  private renderRelayHealth(containerEl: HTMLElement): void {
+    containerEl.empty();
+    const health = this.plugin.getRelayHealth();
+    if (health.length === 0) {
+      containerEl.createEl("p", {
+        text: "No relay health data yet. Start sync to connect.",
+        cls: "setting-item-description",
+      });
+      return;
+    }
+
+    const table = containerEl.createEl("table", {
+      cls: "nostr-sync-health-table",
+    });
+    const header = table.createEl("tr");
+    header.createEl("th", { text: "" });
+    header.createEl("th", { text: "Relay" });
+    header.createEl("th", { text: "Latency" });
+    header.createEl("th", { text: "Status" });
+
+    for (const h of health) {
+      const dot = h.connected
+        ? "🟢"
+        : h.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS
+          ? "🔴"
+          : h.consecutiveErrors > 0
+            ? "🟡"
+            : "⚪";
+      const statusText = h.connected
+        ? "Connected"
+        : h.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS
+          ? "Dead"
+          : h.consecutiveErrors > 0
+            ? "Unstable"
+            : "Unknown";
+      const latencyStr = h.latency === -1 ? "—" : `${h.latency}ms`;
+
+      const row = table.createEl("tr");
+      row.createEl("td", { text: dot });
+      row.createEl("td", { text: h.url });
+      row.createEl("td", { text: latencyStr });
+      row.createEl("td", { text: statusText });
+    }
+  }
+
   // ── Relay Health Dot Helper ─────────────────────────
 
   private getRelayHealthDot(relayUrl: string): string {
@@ -311,5 +366,14 @@ export class SettingsTab extends PluginSettingTab {
     if (h.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) return "🔴";
     if (h.consecutiveErrors > 0) return "🟡";
     return "⚪";
+  }
+
+  // ── Cleanup ─────────────────────────────────────────
+
+  override hide(): void {
+    if (this.healthRefreshInterval !== null) {
+      clearInterval(this.healthRefreshInterval);
+      this.healthRefreshInterval = null;
+    }
   }
 }
