@@ -14,6 +14,13 @@ import {
   encryptPayload,
   decryptPayload,
   sha256,
+  generateVaultKey,
+  encryptWithVaultKey,
+  decryptWithVaultKey,
+  wrapVaultKey,
+  unwrapVaultKey,
+  encryptVaultKeyToRecipient,
+  decryptVaultKeyFromSender,
 } from "../encryption";
 
 // ---------------------------------------------------------------------------
@@ -194,5 +201,152 @@ describe("sha256 checksum", () => {
     expect(h).toBe(
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vault key — generation
+// ---------------------------------------------------------------------------
+
+describe("vault key generation", () => {
+  it("generates a 32-byte random key", () => {
+    const key = generateVaultKey();
+    expect(key.length).toBe(32);
+  });
+
+  it("produces different keys on successive calls", () => {
+    const k1 = generateVaultKey();
+    const k2 = generateVaultKey();
+    expect(k1).not.toEqual(k2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vault key — AES-256-GCM content encryption
+// ---------------------------------------------------------------------------
+
+describe("vault key AES-256-GCM encrypt/decrypt", () => {
+  it("round-trips: encrypt then decrypt", async () => {
+    const vaultKey = generateVaultKey();
+    const plaintext = JSON.stringify({
+      path: "Notes/test.md",
+      content: "# Hello\n\nWorld!",
+      checksum: "abc123",
+      version: 1,
+      modified: 1719440000,
+      contentType: "text/markdown",
+    });
+
+    const encrypted = await encryptWithVaultKey(plaintext, vaultKey);
+    expect(encrypted.length).toBeGreaterThan(0);
+    expect(encrypted).not.toBe(plaintext);
+
+    const decrypted = await decryptWithVaultKey(encrypted, vaultKey);
+    expect(decrypted).toBe(plaintext);
+  });
+
+  it("fails with wrong vault key", async () => {
+    const k1 = generateVaultKey();
+    const k2 = generateVaultKey();
+
+    const encrypted = await encryptWithVaultKey("secret data", k1);
+    await expect(
+      decryptWithVaultKey(encrypted, k2),
+    ).rejects.toThrow();
+  });
+
+  it("produces different ciphertext for same plaintext (random IV)", async () => {
+    const vaultKey = generateVaultKey();
+    const e1 = await encryptWithVaultKey("hello", vaultKey);
+    const e2 = await encryptWithVaultKey("hello", vaultKey);
+    expect(e1).not.toBe(e2);
+  });
+
+  it("handles unicode content (emoji, CJK)", async () => {
+    const vaultKey = generateVaultKey();
+    const unicode = "こんにちは 🌍✨ — 测试 «ñ»";
+    const e = await encryptWithVaultKey(unicode, vaultKey);
+    const d = await decryptWithVaultKey(e, vaultKey);
+    expect(d).toBe(unicode);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vault key — NIP-44 wrapping (local storage)
+// ---------------------------------------------------------------------------
+
+describe("vault key wrap/unwrap", () => {
+  it("round-trips: wrap then unwrap", () => {
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    const convKey = deriveConversationKey(sk, pk);
+    const vaultKey = generateVaultKey();
+
+    const wrapped = wrapVaultKey(vaultKey, convKey);
+    expect(wrapped.length).toBeGreaterThan(0);
+
+    const unwrapped = unwrapVaultKey(wrapped, convKey);
+    expect(unwrapped).toEqual(vaultKey);
+  });
+
+  it("fails with wrong conversation key", () => {
+    const sk1 = generateSecretKey();
+    const sk2 = generateSecretKey();
+    const pk1 = getPublicKey(sk1);
+    const pk2 = getPublicKey(sk2);
+    const ck1 = deriveConversationKey(sk1, pk1);
+    const ck2 = deriveConversationKey(sk2, pk2);
+
+    const wrapped = wrapVaultKey(generateVaultKey(), ck1);
+    expect(() => unwrapVaultKey(wrapped, ck2)).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vault key — sharing (kind 30802 envelopes)
+// ---------------------------------------------------------------------------
+
+describe("vault key sharing (NIP-44 to recipient)", () => {
+  it("round-trips: encrypt to recipient, decrypt from sender", () => {
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+    const vaultKey = generateVaultKey();
+
+    const ciphertext = encryptVaultKeyToRecipient(
+      vaultKey,
+      senderSk,
+      recipientPk,
+    );
+    expect(ciphertext.length).toBeGreaterThan(0);
+
+    const decrypted = decryptVaultKeyFromSender(
+      ciphertext,
+      getPublicKey(senderSk),
+      recipientSk,
+    );
+    expect(decrypted).toEqual(vaultKey);
+  });
+
+  it("wrong recipient cannot decrypt", () => {
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const wrongSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+
+    const ciphertext = encryptVaultKeyToRecipient(
+      generateVaultKey(),
+      senderSk,
+      recipientPk,
+    );
+
+    // Wrong private key should fail to decrypt
+    expect(() =>
+      decryptVaultKeyFromSender(
+        ciphertext,
+        getPublicKey(senderSk),
+        wrongSk,
+      ),
+    ).toThrow();
   });
 });
