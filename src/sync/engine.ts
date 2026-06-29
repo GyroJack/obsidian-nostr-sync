@@ -495,7 +495,11 @@ export class SyncEngine {
       }
 
       const known = this.files.get(payload.path);
-      if (known && known.checksum === payload.checksum) return;
+      if (known && known.checksum === payload.checksum) {
+        const localExists = await this.vault.adapter.exists(payload.path);
+        if (localExists) return;
+        // File not on disk — fall through to write it
+      }
 
       const remoteContent = normalizeContent(payload.content);
       const computed = await sha256(remoteContent);
