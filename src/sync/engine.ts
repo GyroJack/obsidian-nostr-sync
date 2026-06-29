@@ -707,6 +707,21 @@ export class SyncEngine {
   }
 
   // -----------------------------------------------------------------------
+  // Key envelope subscription (kind 30802 — vault key distribution)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Subscribe to kind 30802 envelopes addressed to us (via #p tag).
+   * Used by non-owners to receive the vault key from the owner.
+   */
+  subscribeKeyEnvelopes(onKey: (event: Event) => void): string {
+    return this.relay.subscribe(
+      { kinds: [30802 as number], "#p": [this.pubkey] },
+      onKey,
+    );
+  }
+
+  // -----------------------------------------------------------------------
   // Utilities
   // -----------------------------------------------------------------------
 
