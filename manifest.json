@@ -1,7 +1,7 @@
 {
   "id": "obsidian-nostr-sync-dev",
   "name": "Nostr Sync (Dev)",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "minAppVersion": "1.7.0",
   "description": "Encrypted vault sync via Nostr relays using NIP-44 encryption",
   "author": "Jack & Hermes",

@@ -281,8 +281,6 @@ export class SyncEngine {
   /** Mark a file as deleted and publish an updated vault index. */
   async handleDelete(path: string): Promise<void> {
     await this.enqueue(async () => {
-      const now = Math.floor(Date.now() / 1000);
-      this._deletedAt.set(path, now);
       await this._pushIndex([path]);
       this.files.delete(path);
       this.logActivity(path, "deleted");
@@ -307,10 +305,6 @@ export class SyncEngine {
 
       if (toDelete.length === 0) return;
 
-      const now = Math.floor(Date.now() / 1000);
-      for (const p of toDelete) {
-        this._deletedAt.set(p, now);
-      }
       await this._pushIndex(toDelete);
 
       for (const p of toDelete) {
@@ -419,23 +413,33 @@ export class SyncEngine {
   }
 
   private async _pushIndex(deletedPaths: string[] = []): Promise<void> {
+    const now = Math.max(Math.floor(Date.now() / 1000), this._lastEventTime + 1);
+    this._lastEventTime = now;
+
+    // Merge new deletions into the persistent tombstone map.
+    // This ensures every index publish carries ALL historical tombstones,
+    // so deleted files don't resurrect when another device re-syncs.
+    for (const p of deletedPaths) {
+      this._deletedAt.set(p, now);
+    }
+
     const entries = Array.from(this.files.entries()).map(([path, f]) => ({
       eventId: f.eventId,
       path,
       checksum: f.checksum,
       version: f.version,
-      modified: Math.floor(Date.now() / 1000),
+      modified: now,
     }));
-
-    const now = Math.max(Math.floor(Date.now() / 1000), this._lastEventTime + 1);
-    this._lastEventTime = now;
 
     const indexPayload: VaultIndexPayload = {
       name: "Obsidian Vault",
       description: "Synced via obsidian-nostr-sync",
       created: now,
       files: entries,
-      deleted: deletedPaths.map((p) => ({ path: p, deletedAt: now })),
+      deleted: Array.from(this._deletedAt.entries()).map(([path, deletedAt]) => ({
+        path,
+        deletedAt,
+      })),
       settings: {},
     };
 
