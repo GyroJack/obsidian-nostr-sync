@@ -230,9 +230,9 @@ export class SyncEngine {
   /** Mark a file as deleted and publish an updated vault index. */
   async handleDelete(path: string): Promise<void> {
     await this.enqueue(async () => {
+      await this._pushIndex([path]);
       this.files.delete(path);
       this.logActivity(path, "deleted");
-      await this._pushIndex([path]);
     });
   }
 
@@ -254,12 +254,12 @@ export class SyncEngine {
 
       if (toDelete.length === 0) return;
 
+      await this._pushIndex(toDelete);
+
       for (const p of toDelete) {
         this.files.delete(p);
         this.logActivity(p, "deleted");
       }
-
-      await this._pushIndex(toDelete);
     });
   }
 
@@ -392,10 +392,7 @@ export class SyncEngine {
         return;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        // Rate-limited: back off harder (Fix 3)
-        const delay = msg.includes("rate-limited")
-          ? 5_000 * (i + 1)  // 5s, 10s, 15s
-          : 1_000 * (i + 1); // 1s, 2s, 3s (original)
+        const delay = 1_000 * (i + 1);
         if (i === attempts - 1) {
           console.warn("nostr-sync: publish failed after retries:", msg);
           throw e;
@@ -410,7 +407,10 @@ export class SyncEngine {
   // -----------------------------------------------------------------------
 
   private async enqueue(fn: () => Promise<void>): Promise<void> {
-    this.opQueue = this.opQueue.then(fn, undefined);
+    this.opQueue = this.opQueue.then(fn, (err) => {
+      console.warn("nostr-sync: previous operation failed, continuing:", err);
+      return fn();
+    });
     await this.opQueue;
   }
 
