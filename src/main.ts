@@ -2,7 +2,7 @@
  * obsidian-nostr-sync — encrypted vault sync via Nostr relays.
  */
 import { Plugin, Notice } from "obsidian";
-import { nip19, getPublicKey, SimplePool } from "nostr-tools";
+import { nip19, getPublicKey, utils, SimplePool } from "nostr-tools";
 import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS } from "./constants";
 import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo, SyncActivityEntry } from "./types";
 import { ConflictModal } from "./modals/conflict-modal";
@@ -33,7 +33,7 @@ export default class NostrSyncPlugin extends Plugin {
   private watcher!: VaultWatcher;
   private statusBarItem: HTMLElement | null = null;
   private statusDebounce: ReturnType<typeof setTimeout> | null = null;
-  private latestRelayHealth: RelayHealth[] = [];
+  private wasConnected = false;
 
   override async onload(): Promise<void> {
     try {
@@ -152,10 +152,7 @@ export default class NostrSyncPlugin extends Plugin {
         if (decoded.type !== "nsec") throw new Error("Invalid nsec");
         nsecBytes = decoded.data as Uint8Array;
       } else if (/^[0-9a-fA-F]{64}$/.test(nsec)) {
-        nsecBytes = new Uint8Array(32);
-        for (let i = 0; i < 64; i += 2) {
-          nsecBytes[i / 2] = parseInt(nsec.substring(i, i + 2), 16);
-        }
+        nsecBytes = utils.hexToBytes(nsec);
       } else {
         throw new Error("Invalid nsec format");
       }
@@ -283,8 +280,9 @@ export default class NostrSyncPlugin extends Plugin {
 
     // Wire relay health to status bar
     this.engine.onHealthChange = (health) => {
-      const prevConnected = this.latestRelayHealth.some((h) => h.connected);
-      this.latestRelayHealth = health;
+      const currentlyConnected = health.some((h) => h.connected);
+      const prevConnected = this.wasConnected;
+      this.wasConnected = currentlyConnected;
 
       const relay = health.length > 0 ? health[0] : null;
       const connected = relay?.connected ?? false;
@@ -325,8 +323,7 @@ export default class NostrSyncPlugin extends Plugin {
     if (!this.engine) return;
     this.setSyncStatus("syncing");
     try {
-      await this.engine.syncAllLocalFiles();
-      await this.engine.rebuildIndex();
+      await this.engine.pushAllLocalFiles();
       this.setSyncStatus("idle");
     } catch (e) {
       console.warn("nostr-sync: sync cycle failed", e);

@@ -85,17 +85,13 @@ describe("NIP-44 conversation key", () => {
     expect(ck1).not.toEqual(ck2);
   });
 
-  it("accepts hex string privkey", () => {
+  it("derives conversation key from privkey", () => {
     const sk = generateSecretKey();
     const pk = getPublicKey(sk);
-    const hex = Array.from(sk)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
 
-    const ck1 = deriveConversationKey(sk, pk);
-    const ck2 = deriveConversationKey(hex, pk);
+    const ck = deriveConversationKey(sk, pk);
 
-    expect(ck1).toEqual(ck2);
+    expect(ck).toBeDefined();
   });
 });
 

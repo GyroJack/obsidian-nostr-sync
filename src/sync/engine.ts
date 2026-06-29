@@ -110,18 +110,13 @@ export class SyncEngine {
   constructor(
     private vault: Vault,
     private app: App,
-    privkey: Uint8Array | string,
+    privkey: Uint8Array,
     vaultId: string,
     relays?: string[],
   ) {
-    const sk: Uint8Array =
-      privkey instanceof Uint8Array
-        ? privkey
-        : new Uint8Array(Buffer.from(privkey, "hex"));
-
-    this.privkey = sk;
-    this.pubkey  = getPublicKey(sk);
-    this.convKey = deriveConversationKey(sk, this.pubkey);
+    this.privkey = privkey;
+    this.pubkey  = getPublicKey(privkey);
+    this.convKey = deriveConversationKey(privkey, this.pubkey);
     this.vaultId = vaultId;
 
     this.relay = new RelayPool(relays ?? []);
@@ -191,7 +186,7 @@ export class SyncEngine {
       }
 
       // Push any local files the remote doesn't have
-      await this.syncAllLocalFiles();
+      await this.pushAllLocalFiles();
     } catch (e) {
       if (!this.started) return;
       console.debug("nostr-sync: relay connect failed, retrying in", this.retryBackoff, "ms");
@@ -436,7 +431,7 @@ export class SyncEngine {
    * Push all local syncable files that are missing from or newer than
    * the remote state. Called once after initial connect to catch up.
    */
-  async syncAllLocalFiles(): Promise<void> {
+  async pushAllLocalFiles(): Promise<void> {
     const allFiles = this.vault.getMarkdownFiles();
 
     for (const file of allFiles) {

@@ -6,7 +6,7 @@
  *   nsec ──ECDH(self)─────────▶ conversationKey ──NIP-44─────▶ file ciphertext (on relays)
  */
 
-import { nip44, utils } from "nostr-tools";
+import { nip44 } from "nostr-tools";
 import { PBKDF2_ITERATIONS } from "../constants";
 
 // ---------------------------------------------------------------------------
@@ -174,11 +174,10 @@ export async function unwrapNsecDevice(
  * Derive a NIP-44 self-conversation key: ECDH(privkey, pubkey).
  */
 export function deriveConversationKey(
-  privkey: Uint8Array | string,
+  privkey: Uint8Array,
   pubkey: string,
 ): Uint8Array {
-  const sk = typeof privkey === "string" ? utils.hexToBytes(privkey) : privkey;
-  return nip44.getConversationKey(sk, pubkey);
+  return nip44.getConversationKey(privkey, pubkey);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,8 +188,6 @@ export function encryptPayload(
   conversationKey: Uint8Array,
   plaintext: string,
 ): string {
-  // NIP-44 requires at least 1 byte — guard empty strings
-  if (!plaintext) return nip44.encrypt(" ", conversationKey);
   return nip44.encrypt(plaintext, conversationKey);
 }
 

@@ -23,16 +23,6 @@ export class RelayPool {
     }
   }
 
-  /** Replace the active relay set and disconnect from previous relays. */
-  setUrls(urls: string[]): void {
-    this.disconnect();
-    this.urls = new Set(urls.filter(isValidRelayUrl));
-    this.health.clear();
-    for (const url of this.urls) {
-      this.initHealth(url);
-    }
-  }
-
   /** Open connections to all configured relays, measuring connection latency. */
   async connect(): Promise<void> {
     const arr = Array.from(this.urls);
@@ -71,7 +61,6 @@ export class RelayPool {
         const start = Date.now();
         await this.pool.publish([h.url], event);
         this.updateHealth(h.url, true, Date.now() - start);
-        this.emitHealth();
         return;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -79,7 +68,6 @@ export class RelayPool {
         // This is not a failure — treat it as success for our purposes (Fix 3).
         if (msg.includes("replaced")) {
           this.updateHealth(h.url, true);
-          this.emitHealth();
           return;
         }
         lastError = e instanceof Error ? e : new Error(String(e));

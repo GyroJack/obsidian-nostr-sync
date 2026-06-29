@@ -5,9 +5,6 @@
 import { App, Modal } from "obsidian";
 import type { ConflictInfo, ConflictChoice } from "../types";
 
-export { ConflictChoice };
-export type { ConflictInfo };
-
 export class ConflictModal extends Modal {
   private resolve!: (choice: ConflictChoice) => void;
 
