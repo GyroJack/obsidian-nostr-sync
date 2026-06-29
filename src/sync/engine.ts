@@ -127,9 +127,7 @@ export class SyncEngine {
     this.convKey = deriveConversationKey(sk, this.pubkey);
     this.vaultId = vaultId;
 
-    this.relay = new RelayPool(
-      relays ?? ["wss://relay.damus.io", "wss://nos.lol"],
-    );
+    this.relay = new RelayPool(relays ?? []);
 
     // Wire health callback
     this.relay.onHealthChange = (health) => {

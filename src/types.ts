@@ -39,6 +39,7 @@ export interface NostrSyncSettings {
   salt: string;            // PBKDF2 salt, base64
   pubkey: string;          // hex public key
   vaultId: string;         // deterministic vault identifier, persisted across restarts
+  deviceEncryptedNsec: string;  // nsec encrypted with device-derived key (no passphrase needed)
   relays: string[];
   syncEnabled: boolean;
   syncStatus: SyncStatus;

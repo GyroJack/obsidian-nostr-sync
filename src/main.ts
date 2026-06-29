@@ -6,18 +6,20 @@ import { nip19, getPublicKey, SimplePool } from "nostr-tools";
 import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS } from "./constants";
 import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo, SyncActivityEntry } from "./types";
 import { ConflictModal } from "./modals/conflict-modal";
-import { unwrapNsec, wrapNsec } from "./crypto/encryption";
+import { unwrapNsec, wrapNsec, unwrapNsecDevice, wrapNsecDevice } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
 import { VaultWatcher } from "./sync/watcher";
 import type { FileChangeEvent } from "./sync/watcher";
 import { SettingsTab } from "./settings";
 import { PassphraseModal } from "./modals";
+import type { PassphraseResult } from "./modals";
 
 const DEFAULTS: NostrSyncSettings = {
   encryptedNsec: "",
   salt: "",
   pubkey: "",
   vaultId: "",
+  deviceEncryptedNsec: "",
   relays: [...DEFAULT_RELAYS],
   syncEnabled: false,
   syncStatus: "locked",
@@ -66,8 +68,7 @@ export default class NostrSyncPlugin extends Plugin {
       });
 
       if (this.settings.syncEnabled && this.settings.encryptedNsec) {
-        // Defer modal to after layout ready — otherwise onload() hangs
-        // and Obsidian kills the plugin for taking too long.
+        // Defer to after layout ready — otherwise onload() hangs
         this.app.workspace.onLayoutReady(() => {
           void this.unlockAndStart();
         });
@@ -118,11 +119,12 @@ export default class NostrSyncPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  /** Remove the encrypted nsec, salt, and pubkey from settings and stop sync. */
+  /** Remove all stored keys and stop sync. */
   clearStoredKey(): void {
     this.settings.encryptedNsec = "";
     this.settings.salt          = "";
     this.settings.pubkey        = "";
+    this.settings.deviceEncryptedNsec = "";
     this.settings.syncEnabled   = false;
     this.engine?.stop();
     void this.saveSettings();
@@ -131,8 +133,7 @@ export default class NostrSyncPlugin extends Plugin {
 
   /**
    * Register a new nsec with a passphrase.
-   * Validates the key, wraps it with the passphrase, derives the pubkey,
-   * persists settings, and starts the sync engine.
+   * Also stores a device-encrypted copy so the user isn't prompted on restart.
    */
   async storeNsec(nsec: string, passphrase: string): Promise<void> {
     if (passphrase.length < 8) {
@@ -175,14 +176,42 @@ export default class NostrSyncPlugin extends Plugin {
     await this.startSync(nsecBytes);
     this.settings.syncStatus = "idle";
     await this.saveSettings();
+
+    // Auto-save device-encrypted copy so restart doesn't prompt
+    await this.saveDeviceEncryptedNsec(nsecBytes);
     new Notice("Nostr Sync: key registered and syncing");
   }
 
   // ── Unlock ────────────────────────────────────────
 
+  /**
+   * Try to unlock and start sync. Device-key first, then passphrase prompt.
+   */
   private async unlockAndStart(): Promise<void> {
-    const pw = await PassphraseModal.prompt(this.app);
-    if (!pw) {
+    // 1. Try device-key auto-unlock first
+    if (this.settings.deviceEncryptedNsec && this.settings.pubkey && this.settings.vaultId) {
+      try {
+        const nsecBytes = await unwrapNsecDevice(
+          this.settings.deviceEncryptedNsec,
+          this.settings.pubkey,
+          this.settings.vaultId,
+        );
+        await this.startSync(nsecBytes);
+        this.settings.syncStatus = "idle";
+        await this.saveSettings();
+        return;
+      } catch {
+        // Device key mismatch (settings migrated to new device? pubkey/vaultId changed?)
+        // Fall through to passphrase prompt.
+        console.debug("nostr-sync: device-key auto-unlock failed, falling back to passphrase");
+        this.settings.deviceEncryptedNsec = "";
+        await this.saveSettings();
+      }
+    }
+
+    // 2. Fall back to passphrase prompt
+    const result: PassphraseResult | null = await PassphraseModal.prompt(this.app);
+    if (!result) {
       this.settings.syncStatus = "locked";
       await this.saveSettings();
       this.setSyncStatus("locked");
@@ -194,7 +223,7 @@ export default class NostrSyncPlugin extends Plugin {
       nsecBytes = await unwrapNsec(
         this.settings.encryptedNsec,
         this.settings.salt,
-        pw,
+        result.passphrase,
       );
     } catch {
       new Notice(
@@ -210,7 +239,28 @@ export default class NostrSyncPlugin extends Plugin {
     await this.startSync(nsecBytes);
     this.settings.syncStatus = "idle";
     await this.saveSettings();
+
+    // If user checked "Remember this device", save device-encrypted copy
+    if (result.remember) {
+      await this.saveDeviceEncryptedNsec(nsecBytes);
+    }
+
     new Notice("Nostr Sync: unlocked and syncing");
+  }
+
+  /** Encrypt nsec with device-derived key and persist to settings. */
+  private async saveDeviceEncryptedNsec(nsecBytes: Uint8Array): Promise<void> {
+    if (!this.settings.pubkey || !this.settings.vaultId) return;
+    try {
+      this.settings.deviceEncryptedNsec = await wrapNsecDevice(
+        nsecBytes,
+        this.settings.pubkey,
+        this.settings.vaultId,
+      );
+      await this.saveSettings();
+    } catch (e) {
+      console.warn("nostr-sync: failed to save device-encrypted key", e);
+    }
   }
 
   // ── Sync ──────────────────────────────────────────

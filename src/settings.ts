@@ -188,7 +188,7 @@ export class SettingsTab extends PluginSettingTab {
     });
 
     containerEl.createEl("p", {
-      text: "Default relays: damus.io, nos.lol, primal.net, ditto.pub",
+      text: "Your private relay (ws://your-relay:7777) should be listed above. One URL per line.",
       cls: "setting-item-description",
     });
 

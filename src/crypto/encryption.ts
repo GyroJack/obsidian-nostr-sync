@@ -103,6 +103,70 @@ export async function unwrapNsec(
 }
 
 // ---------------------------------------------------------------------------
+// Device-key encryption (no passphrase — derived from pubkey + vaultId)
+// ---------------------------------------------------------------------------
+
+const DEVICE_SALT = new TextEncoder().encode("nostr-sync-device-v1");
+
+async function deriveDeviceKey(pubkey: string, vaultId: string): Promise<CryptoKey> {
+  const enc = new TextEncoder();
+  const material = enc.encode(`${pubkey}:${vaultId}`);
+  const baseKey = await crypto.subtle.importKey(
+    "raw",
+    material,
+    "PBKDF2",
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt: DEVICE_SALT, iterations: 100_000, hash: "SHA-256" },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/**
+ * Encrypt nsec with a key derived from pubkey + vaultId.
+ * No passphrase — auto-unlock on the same device.
+ */
+export async function wrapNsecDevice(
+  nsecBytes: Uint8Array,
+  pubkey: string,
+  vaultId: string,
+): Promise<string> {
+  const key = await deriveDeviceKey(pubkey, vaultId);
+  const iv  = crypto.getRandomValues(new Uint8Array(IV_LEN));
+  const ct  = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, nsecBytes as BufferSource);
+  const arr = new Uint8Array(ct);
+
+  const buf = new Uint8Array(IV_LEN + arr.length);
+  buf.set(iv, 0);
+  buf.set(arr, IV_LEN);
+
+  return bytesToBase64(buf);
+}
+
+/**
+ * Decrypt a device-wrapped nsec blob.
+ * Throws if pubkey/vaultId don't match (GCM auth tag check).
+ */
+export async function unwrapNsecDevice(
+  encryptedBase64: string,
+  pubkey: string,
+  vaultId: string,
+): Promise<Uint8Array> {
+  const blob = base64ToBytes(encryptedBase64);
+  const iv         = blob.slice(0, IV_LEN);
+  const ciphertext = blob.slice(IV_LEN);
+  const key        = await deriveDeviceKey(pubkey, vaultId);
+
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext as BufferSource);
+  return new Uint8Array(pt);
+}
+
+// ---------------------------------------------------------------------------
 // NIP-44 conversation key (self-encryption)
 // ---------------------------------------------------------------------------
 
