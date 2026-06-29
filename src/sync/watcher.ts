@@ -36,14 +36,10 @@ export class VaultWatcher {
       this.debounce(file.path, "modify");
     }));
     this.refs.push(this.vault.on("delete", (file: TAbstractFile) => {
-      this.handler({
-        path: file.path,
-        action: "delete",
-        isFolder: file instanceof TFolder,
-      });
+      this.debounce(file.path, "delete", { isFolder: file instanceof TFolder });
     }));
     this.refs.push(this.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
-      this.handler({ path: file.path, action: "rename", oldPath });
+      this.debounce(file.path, "rename", { oldPath });
     }));
   }
 
@@ -57,14 +53,14 @@ export class VaultWatcher {
     this.timers.clear();
   }
 
-  private debounce(path: string, action: FileChangeAction): void {
+  private debounce(path: string, action: FileChangeAction, extra?: { oldPath?: string; isFolder?: boolean }): void {
     const existing = this.timers.get(path);
     if (existing) clearTimeout(existing);
     this.timers.set(
       path,
       setTimeout(() => {
         this.timers.delete(path);
-        this.handler({ path, action });
+        this.handler({ path, action, ...extra });
       }, SYNC_DEBOUNCE_MS),
     );
   }
