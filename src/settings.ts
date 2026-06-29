@@ -275,7 +275,7 @@ export class SettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Version")
-      .setDesc("1.2.1");
+      .setDesc("1.2.2");
 
     new Setting(containerEl)
       .setName("Authors")
