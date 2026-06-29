@@ -18,8 +18,6 @@ import type { KnownFile, VaultIndexPayload, FilePayload, RelayHealth, ConflictIn
 import {
   decryptPayload,
   encryptPayload,
-  encryptWithVaultKey,
-  decryptWithVaultKey,
   deriveConversationKey,
   sha256,
 } from "../crypto/encryption";
@@ -53,12 +51,6 @@ export class SyncEngine {
   private privkey: Uint8Array;
   private pubkey: string;
   private convKey: Uint8Array;
-
-  /** Shared vault key for content encryption (multi-user vaults). */
-  private vaultKey: Uint8Array | null;
-
-  /** Additional pubkeys to subscribe to (collaborators). */
-  private collaboratorPubkeys: string[];
 
   /** Relay transport */
   private relay: RelayPool;
@@ -114,8 +106,6 @@ export class SyncEngine {
    * @param privkey Nostr secret key bytes.
    * @param vaultId UUID shared across all collaborators.
    * @param relays WebSocket relay URLs.
-   * @param vaultKey Shared AES-256 key for content encryption (null for legacy).
-   * @param collaboratorPubkeys Additional npub hex keys to subscribe to.
    */
   constructor(
     private vault: Vault,
@@ -123,15 +113,11 @@ export class SyncEngine {
     privkey: Uint8Array,
     vaultId: string,
     relays?: string[],
-    vaultKey?: Uint8Array | null,
-    collaboratorPubkeys?: string[],
   ) {
     this.privkey = privkey;
     this.pubkey  = getPublicKey(privkey);
     this.convKey = deriveConversationKey(privkey, this.pubkey);
     this.vaultId = vaultId;
-    this.vaultKey = vaultKey ?? null;
-    this.collaboratorPubkeys = collaboratorPubkeys ?? [];
 
     this.relay = new RelayPool(relays ?? []);
 
@@ -304,35 +290,22 @@ export class SyncEngine {
   }
 
   // -----------------------------------------------------------------------
-  // Content encryption (vault key with legacy NIP-44 fallback)
+  // Content encryption (NIP-44 self-encryption)
   // -----------------------------------------------------------------------
 
-  /** Encrypt content using vault key (AES-256-GCM) when available, else NIP-44. */
+  /** Encrypt content using NIP-44 conversation key. */
   private async encryptContent(plaintext: string): Promise<string> {
-    if (this.vaultKey) {
-      return encryptWithVaultKey(plaintext, this.vaultKey);
-    }
     return encryptPayload(this.convKey, plaintext);
   }
 
-  /**
-   * Decrypt content — tries vault key first (AES-256-GCM), falls back to
-   * NIP-44 self-decrypt for legacy events. Handles the v1.0.x → v1.1.0 transition.
-   */
+  /** Decrypt content using NIP-44 conversation key. */
   private async decryptContent(ciphertext: string): Promise<string> {
-    if (this.vaultKey) {
-      try {
-        return await decryptWithVaultKey(ciphertext, this.vaultKey);
-      } catch {
-        // Vault key decryption failed — fall through to legacy NIP-44
-      }
-    }
     return decryptPayload(this.convKey, ciphertext);
   }
 
-  /** All pubkeys to include in subscription author filters. */
+  /** Always returns just this device's pubkey (no collaborators). */
   private getAllAuthors(): string[] {
-    return [this.pubkey, ...this.collaboratorPubkeys];
+    return [this.pubkey];
   }
 
   // -----------------------------------------------------------------------
@@ -704,21 +677,6 @@ export class SyncEngine {
       }
       this._pendingConflicts.delete(path);
     });
-  }
-
-  // -----------------------------------------------------------------------
-  // Key envelope subscription (kind 30802 — vault key distribution)
-  // -----------------------------------------------------------------------
-
-  /**
-   * Subscribe to kind 30802 envelopes addressed to us (via #p tag).
-   * Used by non-owners to receive the vault key from the owner.
-   */
-  subscribeKeyEnvelopes(onKey: (event: Event) => void): string {
-    return this.relay.subscribe(
-      { kinds: [30802 as number], "#p": [this.pubkey] },
-      onKey,
-    );
   }
 
   // -----------------------------------------------------------------------

@@ -2,11 +2,11 @@
  * obsidian-nostr-sync — encrypted vault sync via Nostr relays.
  */
 import { Plugin, Notice } from "obsidian";
-import { nip19, getPublicKey, utils, SimplePool, finalizeEvent } from "nostr-tools";
-import { DEFAULT_RELAYS, INDEX_KIND, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS, SYNC_DEBOUNCE_MS, VAULT_KEY_KIND } from "./constants";
+import { nip19, getPublicKey, utils, SimplePool } from "nostr-tools";
+import { DEFAULT_RELAYS, INDEX_KIND, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS, SYNC_DEBOUNCE_MS } from "./constants";
 import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo, SyncActivityEntry } from "./types";
 import { ConflictModal } from "./modals/conflict-modal";
-import { unwrapNsec, wrapNsec, unwrapNsecDevice, wrapNsecDevice, generateVaultKey, wrapVaultKey, unwrapVaultKey, deriveConversationKey, encryptVaultKeyToRecipient, decryptVaultKeyFromSender } from "./crypto/encryption";
+import { unwrapNsec, wrapNsec, unwrapNsecDevice, wrapNsecDevice } from "./crypto/encryption";
 import { SyncEngine } from "./sync/engine";
 import { VaultWatcher } from "./sync/watcher";
 import type { FileChangeEvent } from "./sync/watcher";
@@ -20,9 +20,6 @@ const DEFAULTS: NostrSyncSettings = {
   pubkey: "",
   vaultId: "",
   deviceEncryptedNsec: "",
-  encryptedVaultKey: "",
-  collaborators: [],
-  isVaultOwner: false,
   relays: [...DEFAULT_RELAYS],
   syncEnabled: false,
   debounceMs: SYNC_DEBOUNCE_MS,
@@ -39,7 +36,6 @@ export default class NostrSyncPlugin extends Plugin {
   private statusDebounce: ReturnType<typeof setTimeout> | null = null;
   private wasConnected = false;
   private nsecBytes: Uint8Array | null = null;
-  private vaultKeyBytes: Uint8Array | null = null;
 
   override async onload(): Promise<void> {
     try {
@@ -49,7 +45,6 @@ export default class NostrSyncPlugin extends Plugin {
       if (this.settings.vaultId && this.settings.vaultId.length === 12) {
         const legacyId = this.settings.vaultId;
         this.settings.vaultId = "";
-        this.settings.encryptedVaultKey = "";
         console.log(`nostr-sync: legacy vaultId ${legacyId} — will re-discover on sync start`);
         await this.saveSettings();
       } else if (!this.settings.vaultId) {
@@ -126,7 +121,6 @@ export default class NostrSyncPlugin extends Plugin {
     this.settings.salt          = "";
     this.settings.pubkey        = "";
     this.settings.deviceEncryptedNsec = "";
-    this.settings.encryptedVaultKey = "";
     this.settings.syncEnabled   = false;
     this.engine?.stop();
     void this.saveSettings();
@@ -269,177 +263,6 @@ export default class NostrSyncPlugin extends Plugin {
     void this.saveSettings();
   }
 
-  /** Get the vault key from memory (decrypted on startup). */
-  getVaultKey(): Uint8Array | null {
-    return this.vaultKeyBytes;
-  }
-
-  /**
-   * Add a collaborator (owner only).
-   * Encrypts the vault key to their pubkey and publishes a kind 30802 envelope.
-   */
-  async addCollaborator(npubOrHex: string): Promise<void> {
-    if (!this.settings.isVaultOwner || !this.vaultKeyBytes || !this.nsecBytes) {
-      new Notice("❌ Only the vault owner can add collaborators.");
-      return;
-    }
-
-    let hexPubkey: string;
-    try {
-      if (npubOrHex.startsWith("npub1")) {
-        hexPubkey = (nip19.decode(npubOrHex).data as string);
-      } else if (/^[0-9a-fA-F]{64}$/.test(npubOrHex)) {
-        hexPubkey = npubOrHex;
-      } else {
-        throw new Error("Invalid format");
-      }
-    } catch {
-      new Notice("❌ Invalid npub or hex pubkey.");
-      return;
-    }
-
-    if (hexPubkey === this.settings.pubkey) {
-      new Notice("❌ You're already the vault owner.");
-      return;
-    }
-    if (this.settings.collaborators.includes(hexPubkey)) {
-      new Notice("❌ This collaborator has already been added.");
-      return;
-    }
-
-    // Encrypt vault key to recipient
-    const ciphertext = encryptVaultKeyToRecipient(
-      this.vaultKeyBytes,
-      this.nsecBytes,
-      hexPubkey,
-    );
-
-    // Publish kind 30802 envelope
-    const unsigned = {
-      kind: VAULT_KEY_KIND,
-      pubkey: this.settings.pubkey,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [["p", hexPubkey], ["d", `vault-key:${this.settings.vaultId}`]],
-      content: ciphertext,
-    };
-    const signed = finalizeEvent(unsigned, this.nsecBytes);
-
-    // Use a temporary relay pool to publish (not the engine's pool)
-    const pool = new SimplePool();
-    let published = false;
-    try {
-      const relays = this.settings.relays.filter(isValidRelayUrl);
-      await Promise.any(relays.map((url) => pool.publish([url], signed)));
-      published = true;
-    } catch {
-      new Notice("⚠️ Failed to publish key envelope to any relay.");
-    } finally {
-      pool.close(this.settings.relays.filter(isValidRelayUrl));
-    }
-
-    if (!published) return;
-
-    this.settings.collaborators.push(hexPubkey);
-    await this.saveSettings();
-    new Notice(`✅ Collaborator added: ${npubOrHex.slice(0, 12)}...`);
-  }
-
-  /**
-   * Remove a collaborator. Rotates the vault key and re-distributes.
-   */
-  async removeCollaborator(pubkey: string): Promise<void> {
-    if (!this.settings.isVaultOwner) {
-      new Notice("❌ Only the vault owner can remove collaborators.");
-      return;
-    }
-
-    this.settings.collaborators = this.settings.collaborators.filter((p) => p !== pubkey);
-    await this.saveSettings();
-
-    // Rotate vault key
-    const newKey = await this.createVaultKey();
-
-    // Re-distribute to all remaining collaborators (single pool)
-    const pool = new SimplePool();
-    const relays = this.settings.relays.filter(isValidRelayUrl);
-    try {
-      for (const collabPubkey of this.settings.collaborators) {
-        const ciphertext = encryptVaultKeyToRecipient(newKey, this.nsecBytes!, collabPubkey);
-        const unsigned = {
-          kind: VAULT_KEY_KIND,
-          pubkey: this.settings.pubkey,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [["p", collabPubkey], ["d", `vault-key:${this.settings.vaultId}`]],
-          content: ciphertext,
-        };
-        const signed = finalizeEvent(unsigned, this.nsecBytes!);
-
-        try {
-          await Promise.any(relays.map((url) => pool.publish([url], signed)));
-        } catch {
-          console.warn(`nostr-sync: failed to re-distribute key to ${collabPubkey.slice(0, 12)}`);
-        }
-      }
-    } finally {
-      pool.close(relays);
-    }
-
-    new Notice(`✅ Collaborator removed. Vault key rotated.`);
-  }
-
-  /**
-   * Handle an incoming kind 30802 vault key envelope.
-   * Decrypts the vault key with our nsec and saves it locally.
-   */
-  private async onRemoteKeyEnvelope(event: { pubkey: string; content: string }): Promise<void> {
-    if (!this.nsecBytes) return;
-    try {
-      const vaultKey = decryptVaultKeyFromSender(
-        event.content,
-        event.pubkey,
-        this.nsecBytes,
-      );
-      this.vaultKeyBytes = vaultKey;
-
-      const convKey = deriveConversationKey(this.nsecBytes, this.settings.pubkey);
-      this.settings.encryptedVaultKey = wrapVaultKey(vaultKey, convKey);
-      await this.saveSettings();
-
-      new Notice("🔑 Nostr Sync: received vault key — restarting sync...");
-      if (this.engine) this.engine.stop();
-      await this.startSync(this.nsecBytes);
-      await this.syncNow();
-    } catch (e) {
-      console.warn("nostr-sync: failed to decrypt vault key envelope", e);
-    }
-  }
-
-  /** Create a new vault key — owner only (for collaboration). */
-  private async createVaultKey(): Promise<Uint8Array> {
-    const vaultKey = generateVaultKey();
-    if (!this.nsecBytes) throw new Error("Cannot create vault key without nsec");
-    const pubkey = this.settings.pubkey;
-    const convKey = deriveConversationKey(this.nsecBytes, pubkey);
-    this.settings.encryptedVaultKey = wrapVaultKey(vaultKey, convKey);
-    this.vaultKeyBytes = vaultKey;
-    await this.saveSettings();
-
-    return vaultKey;
-  }
-
-  /** Load the vault key from local storage (NIP-44 self-decrypt). */
-  private loadVaultKey(): Uint8Array | null {
-    if (!this.settings.encryptedVaultKey || !this.nsecBytes) return null;
-    try {
-      const pubkey = this.settings.pubkey;
-      const convKey = deriveConversationKey(this.nsecBytes, pubkey);
-      return unwrapVaultKey(this.settings.encryptedVaultKey, convKey);
-    } catch {
-      console.warn("nostr-sync: failed to decrypt vault key");
-      return null;
-    }
-  }
-
   // ── Sync ──────────────────────────────────────────
 
   private async startSync(nsecBytes: Uint8Array): Promise<void> {
@@ -459,7 +282,6 @@ export default class NostrSyncPlugin extends Plugin {
           const dTag = events[0].tags.find((t) => t[0] === "d")?.[1];
           if (dTag) {
             this.settings.vaultId = dTag;
-            this.settings.isVaultOwner = true;
             console.log(`nostr-sync: discovered existing vault ${dTag}`);
             await this.saveSettings();
           }
@@ -469,27 +291,10 @@ export default class NostrSyncPlugin extends Plugin {
       }
       if (!this.settings.vaultId) {
         this.settings.vaultId = crypto.randomUUID();
-        this.settings.isVaultOwner = true;
         console.log(`nostr-sync: created new vault ${this.settings.vaultId}`);
         await this.saveSettings();
       }
     }
-
-    // ── Vault key (only for collaboration) ──────────
-    // Onyx-style self-sync: when there are no collaborators, we use
-    // NIP-44 self-encryption (deterministic from nsec) — no vault key needed.
-    // The vault key only exists when sharing with other pubkeys.
-    let vaultKey: Uint8Array | null = null;
-    if (this.settings.collaborators.length > 0) {
-      vaultKey = this.loadVaultKey();
-      if (!vaultKey && this.settings.isVaultOwner) {
-        vaultKey = await this.createVaultKey();
-      }
-      if (!vaultKey && !this.settings.isVaultOwner) {
-        console.warn("nostr-sync: no vault key yet — waiting for kind 30802 envelope");
-      }
-    }
-    this.vaultKeyBytes = vaultKey;
 
     this.engine = new SyncEngine(
       this.app.vault,
@@ -497,8 +302,6 @@ export default class NostrSyncPlugin extends Plugin {
       nsecBytes,
       this.settings.vaultId,
       this.settings.relays.filter(isValidRelayUrl),
-      vaultKey,
-      this.settings.collaborators,
     );
 
     // Wire relay health to status bar
@@ -531,16 +334,6 @@ export default class NostrSyncPlugin extends Plugin {
     };
 
     this.engine.onConflict = (info) => this.showConflictModal(info);
-
-    // Non-owners: subscribe to kind 30802 to receive vault key from owner
-    if (!vaultKey && !this.settings.isVaultOwner) {
-      this.engine.subscribeKeyEnvelopes((event) => {
-        this.onRemoteKeyEnvelope(event).catch((e) => {
-          console.warn("nostr-sync: failed to process key envelope", e);
-        });
-      });
-      console.log("nostr-sync: subscribed to kind 30802 (waiting for vault key)");
-    }
 
     this.watcher = new VaultWatcher(this.app.vault, (e: FileChangeEvent) =>
       this.handleFileChange(e),
