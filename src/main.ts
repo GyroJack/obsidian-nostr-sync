@@ -328,14 +328,18 @@ export default class NostrSyncPlugin extends Plugin {
 
     // Use a temporary relay pool to publish (not the engine's pool)
     const pool = new SimplePool();
+    let published = false;
     try {
       const relays = this.settings.relays.filter(isValidRelayUrl);
       await Promise.any(relays.map((url) => pool.publish([url], signed)));
+      published = true;
     } catch {
       new Notice("⚠️ Failed to publish key envelope to any relay.");
     } finally {
       pool.close(this.settings.relays.filter(isValidRelayUrl));
     }
+
+    if (!published) return;
 
     this.settings.collaborators.push(hexPubkey);
     await this.saveSettings();
@@ -357,27 +361,29 @@ export default class NostrSyncPlugin extends Plugin {
     // Rotate vault key
     const newKey = await this.createVaultKey();
 
-    // Re-distribute to all remaining collaborators
-    for (const collabPubkey of this.settings.collaborators) {
-      const ciphertext = encryptVaultKeyToRecipient(newKey, this.nsecBytes!, collabPubkey);
-      const unsigned = {
-        kind: VAULT_KEY_KIND,
-        pubkey: this.settings.pubkey,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [["p", collabPubkey], ["d", `vault-key:${this.settings.vaultId}`]],
-        content: ciphertext,
-      };
-      const signed = finalizeEvent(unsigned, this.nsecBytes!);
+    // Re-distribute to all remaining collaborators (single pool)
+    const pool = new SimplePool();
+    const relays = this.settings.relays.filter(isValidRelayUrl);
+    try {
+      for (const collabPubkey of this.settings.collaborators) {
+        const ciphertext = encryptVaultKeyToRecipient(newKey, this.nsecBytes!, collabPubkey);
+        const unsigned = {
+          kind: VAULT_KEY_KIND,
+          pubkey: this.settings.pubkey,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", collabPubkey], ["d", `vault-key:${this.settings.vaultId}`]],
+          content: ciphertext,
+        };
+        const signed = finalizeEvent(unsigned, this.nsecBytes!);
 
-      const pool = new SimplePool();
-      try {
-        const relays = this.settings.relays.filter(isValidRelayUrl);
-        await Promise.any(relays.map((url) => pool.publish([url], signed)));
-      } catch {
-        console.warn(`nostr-sync: failed to re-distribute key to ${collabPubkey.slice(0, 12)}`);
-      } finally {
-        pool.close(this.settings.relays.filter(isValidRelayUrl));
+        try {
+          await Promise.any(relays.map((url) => pool.publish([url], signed)));
+        } catch {
+          console.warn(`nostr-sync: failed to re-distribute key to ${collabPubkey.slice(0, 12)}`);
+        }
       }
+    } finally {
+      pool.close(relays);
     }
 
     new Notice(`✅ Collaborator removed. Vault key rotated.`);
