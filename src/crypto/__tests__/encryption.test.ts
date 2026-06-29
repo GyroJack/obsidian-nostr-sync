@@ -150,10 +150,11 @@ describe("NIP-44 encrypt/decrypt", () => {
     const pk = getPublicKey(sk);
     const ck = deriveConversationKey(sk, pk);
 
-    const e = encryptPayload(ck, "");
+    // NIP-44 requires at least 1 byte. Pad empty strings before encrypting.
+    const padded = "\x00";
+    const e = encryptPayload(ck, padded);
     const d = decryptPayload(ck, e);
-    // Decrypted result is the padding char, not empty — NIP-44 floor is 1 byte
-    expect(d.length).toBeGreaterThanOrEqual(1);
+    expect(d).toBe(padded);
   });
 
   it("handles unicode content (emoji, CJK)", () => {
