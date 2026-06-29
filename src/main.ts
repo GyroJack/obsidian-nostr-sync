@@ -3,7 +3,7 @@
  */
 import { Plugin, Notice } from "obsidian";
 import { nip19, getPublicKey, utils, SimplePool, finalizeEvent } from "nostr-tools";
-import { DEFAULT_RELAYS, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS, SYNC_DEBOUNCE_MS, VAULT_KEY_KIND } from "./constants";
+import { DEFAULT_RELAYS, INDEX_KIND, isValidRelayUrl, MAX_CONSECUTIVE_ERRORS, SYNC_DEBOUNCE_MS, VAULT_KEY_KIND } from "./constants";
 import type { NostrSyncSettings, RelayHealth, SyncStatus, ConflictInfo, SyncActivityEntry } from "./types";
 import { ConflictModal } from "./modals/conflict-modal";
 import { unwrapNsec, wrapNsec, unwrapNsecDevice, wrapNsecDevice, generateVaultKey, wrapVaultKey, unwrapVaultKey, deriveConversationKey, encryptVaultKeyToRecipient, decryptVaultKeyFromSender } from "./crypto/encryption";
@@ -48,14 +48,12 @@ export default class NostrSyncPlugin extends Plugin {
       // ── Vault ID migration (v1.0.x → v1.1.0) ──────
       if (this.settings.vaultId && this.settings.vaultId.length === 12) {
         const legacyId = this.settings.vaultId;
-        this.settings.vaultId = crypto.randomUUID();
-        this.settings.isVaultOwner = true;
-        console.log(`nostr-sync: migrated vaultId ${legacyId} → ${this.settings.vaultId}`);
+        this.settings.vaultId = "";
+        this.settings.encryptedVaultKey = "";
+        console.log(`nostr-sync: legacy vaultId ${legacyId} — will re-discover on sync start`);
         await this.saveSettings();
       } else if (!this.settings.vaultId) {
-        this.settings.vaultId = crypto.randomUUID();
-        this.settings.isVaultOwner = true;
-        await this.saveSettings();
+        // No vaultId yet — defer discovery to startSync()
       }
 
       this.addSettingTab(new SettingsTab(this.app, this));
@@ -425,6 +423,29 @@ export default class NostrSyncPlugin extends Plugin {
     this.settings.encryptedVaultKey = wrapVaultKey(vaultKey, convKey);
     this.vaultKeyBytes = vaultKey;
     await this.saveSettings();
+
+    // Self-publish vault key envelope so other devices can discover it
+    try {
+      const ciphertext = encryptVaultKeyToRecipient(vaultKey, this.nsecBytes, this.settings.pubkey);
+      const unsigned = {
+        kind: VAULT_KEY_KIND,
+        pubkey: this.settings.pubkey,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["p", this.settings.pubkey], ["d", `vault-key:${this.settings.vaultId}`]],
+        content: ciphertext,
+      };
+      const signed = finalizeEvent(unsigned, this.nsecBytes);
+      const pool = new SimplePool();
+      const relays = this.settings.relays.filter(isValidRelayUrl);
+      try {
+        await Promise.any(relays.map((url) => pool.publish([url], signed)));
+      } finally {
+        pool.close(relays);
+      }
+    } catch (e) {
+      console.warn("nostr-sync: failed to self-publish vault key envelope", e);
+    }
+
     return vaultKey;
   }
 
@@ -446,9 +467,69 @@ export default class NostrSyncPlugin extends Plugin {
   private async startSync(nsecBytes: Uint8Array): Promise<void> {
     this.nsecBytes = nsecBytes;
 
+    // ── Vault ID discovery ──────────────────────────
+    if (!this.settings.vaultId) {
+      const pool = new SimplePool();
+      const relays = this.settings.relays.filter(isValidRelayUrl);
+      try {
+        const events = await pool.querySync(relays, {
+          kinds: [INDEX_KIND],
+          authors: [this.settings.pubkey],
+          limit: 1,
+        });
+        if (events.length > 0) {
+          const dTag = events[0].tags.find((t) => t[0] === "d")?.[1];
+          if (dTag) {
+            this.settings.vaultId = dTag;
+            this.settings.isVaultOwner = true;
+            console.log(`nostr-sync: discovered existing vault ${dTag}`);
+            await this.saveSettings();
+          }
+        }
+      } finally {
+        pool.close(relays);
+      }
+      if (!this.settings.vaultId) {
+        this.settings.vaultId = crypto.randomUUID();
+        this.settings.isVaultOwner = true;
+        console.log(`nostr-sync: created new vault ${this.settings.vaultId}`);
+        await this.saveSettings();
+      }
+    }
+
     let vaultKey = this.loadVaultKey();
     if (!vaultKey && this.settings.isVaultOwner) {
-      vaultKey = await this.createVaultKey();
+      // Try to discover vault key from relays before creating a new one
+      const pool = new SimplePool();
+      const relays = this.settings.relays.filter(isValidRelayUrl);
+      try {
+        const events = await pool.querySync(relays, {
+          kinds: [VAULT_KEY_KIND],
+          "#p": [this.settings.pubkey],
+          limit: 1,
+        });
+        if (events.length > 0) {
+          try {
+            const discoveredKey = decryptVaultKeyFromSender(
+              events[0].content,
+              events[0].pubkey,
+              this.nsecBytes!,
+            );
+            const convKey = deriveConversationKey(this.nsecBytes!, this.settings.pubkey);
+            this.settings.encryptedVaultKey = wrapVaultKey(discoveredKey, convKey);
+            vaultKey = discoveredKey;
+            console.log("nostr-sync: discovered existing vault key from relay");
+            await this.saveSettings();
+          } catch (e) {
+            console.warn("nostr-sync: failed to decrypt discovered vault key", e);
+          }
+        }
+      } finally {
+        pool.close(relays);
+      }
+      if (!vaultKey) {
+        vaultKey = await this.createVaultKey();
+      }
     }
     if (!vaultKey && !this.settings.isVaultOwner) {
       console.warn("nostr-sync: no vault key yet — waiting for kind 30802 envelope");
