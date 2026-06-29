@@ -278,17 +278,78 @@ export class SettingsTab extends PluginSettingTab {
       .setDesc("Share this with collaborators so they can join your vault.")
       .addText((t) =>
         t.setValue(this.plugin.settings.vaultId || "(no vault yet)").setDisabled(true),
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Copy").onClick(() => {
+          const vaultId = this.plugin.settings.vaultId;
+          if (vaultId) {
+            navigator.clipboard.writeText(vaultId).then(() => {
+              new Notice("📋 Vault ID copied to clipboard");
+            });
+          }
+        }),
       );
 
+    // Existing collaborators
+    if (this.plugin.settings.collaborators.length > 0) {
+      for (const pubkey of this.plugin.settings.collaborators) {
+        try {
+          const npub = nip19.npubEncode(pubkey);
+          new Setting(containerEl)
+            .setName(npub.slice(0, 20) + "...")
+            .setDesc("hex: " + pubkey.slice(0, 16) + "...")
+            .addButton((btn) =>
+              btn.setButtonText("✕ Remove").onClick(async () => {
+                await this.plugin.removeCollaborator(pubkey);
+                containerEl.empty();
+                this.display();
+              }),
+            );
+        } catch {
+          // Invalid pubkey somehow — show raw
+          new Setting(containerEl)
+            .setName(pubkey.slice(0, 20) + "...")
+            .addButton((btn) =>
+              btn.setButtonText("✕ Remove").onClick(async () => {
+                await this.plugin.removeCollaborator(pubkey);
+                containerEl.empty();
+                this.display();
+              }),
+            );
+        }
+      }
+    } else {
+      containerEl.createEl("p", {
+        text: "No collaborators yet. Add one to share this vault.",
+        cls: "setting-item-description",
+      });
+    }
+
+    // Add collaborator
+    let newCollabInput = "";
     new Setting(containerEl)
       .setName("Add collaborator")
       .setDesc(
-        "Share your vault with other Nostr users. " +
-        "Each collaborator uses their own nsec. Coming in v1.1.0.",
+        "Enter a npub or hex pubkey to share this vault. " +
+        "They'll receive an encrypted copy of the vault key over Nostr.",
       )
+      .addText((t) => {
+        t.setPlaceholder("npub1... or hex pubkey");
+        t.onChange((v) => { newCollabInput = v; });
+      })
       .addButton((btn) =>
-        btn.setButtonText("+ Add").onClick(() => {
-          new Notice("👥 Collaborator management coming in v1.1.0");
+        btn.setButtonText("+ Add").setCta().onClick(async () => {
+          if (!newCollabInput.trim()) {
+            new Notice("❌ Enter an npub or hex pubkey.");
+            return;
+          }
+          btn.setDisabled(true);
+          btn.setButtonText("...");
+          await this.plugin.addCollaborator(newCollabInput.trim());
+          btn.setDisabled(false);
+          btn.setButtonText("+ Add");
+          containerEl.empty();
+          this.display();
         }),
       );
 
